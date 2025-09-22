@@ -20,6 +20,45 @@ steps:
         'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
       ]
 
+  # Debug step to check files
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Listing current directory contents:"
+        pwd
+        ls -la
+        echo "Creating startup script..."
+        cat > startup.sh << 'EOL'
+        #!/bin/bash
+        # Update & install Docker
+        apt-get update -y
+        apt-get install -y docker.io
+
+        # Enable & start Docker
+        systemctl enable docker
+        systemctl start docker
+        sleep 15
+
+        # Configure Docker authentication for Artifact Registry
+        gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+
+        # Pull latest image
+        docker pull asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}
+
+        # Stop & remove old container (if exists)
+        docker stop simple-web-app || true
+        docker rm simple-web-app || true
+
+        # Run new container
+        docker run -d -p 8080:8080 --name simple-web-app asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}
+
+        # Log completion
+        echo "Container deployment completed: $(date)" >> /var/log/startup-script.log
+        EOL
+        chmod +x startup.sh
+
   # Step 3: Blue-Green Deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-bluegreen'
@@ -34,7 +73,7 @@ steps:
 
         # Create instance template
         gcloud compute instance-templates create $${TEMPLATE} \
-          --metadata-from-file=startup-script=Startup.script \
+          --metadata-from-file=startup-script=startup.sh \
           --metadata=IMAGE='asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app',IMAGE_TAG='${SHORT_SHA}' \
           --service-account='${_VM_SA}' \
           --scopes=https://www.googleapis.com/auth/cloud-platform \
