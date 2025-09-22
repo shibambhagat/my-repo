@@ -30,50 +30,44 @@ images:
   args:
     - '-c'
     - >
-      set -euo pipefail
-      echo "Starting blue-green deploy for ${SHORT_SHA}"
-      TEMPLATE="it-${SHORT_SHA}"
-      GREEN_MIG="green-mig-${SHORT_SHA}"
-
-      # Create instance template using startup.sh in repo (no changes)
+      set -euo pipefail; \
+      echo "Starting blue-green deploy for ${SHORT_SHA}"; \
+      TEMPLATE="it-${SHORT_SHA}"; \
+      GREEN_MIG="green-mig-${SHORT_SHA}"; \
+      \
       gcloud compute instance-templates create "${TEMPLATE}" \
         --metadata-from-file=startup-script=startup.sh \
         --metadata=IMAGE='${_IMAGE}',IMAGE_TAG='${SHORT_SHA}',APP_VERSION='${SHORT_SHA}' \
         --service-account="${_VM_SA}" \
         --scopes=https://www.googleapis.com/auth/cloud-platform \
-        --machine-type=e2-micro
-
-      # Create green MIG
+        --machine-type=e2-micro; \
+      \
       gcloud compute instance-groups managed create "${GREEN_MIG}" \
         --base-instance-name=web-green \
         --template="${TEMPLATE}" \
         --size="${_MIG_SIZE}" \
-        --zone="${_ZONE}"
-
-      # Ensure named ports
-      gcloud compute instance-groups set-named-ports "${GREEN_MIG}" --named-ports=http:8080 --zone="${_ZONE}"
-
-      # Add green to backend service
+        --zone="${_ZONE}"; \
+      \
+      gcloud compute instance-groups set-named-ports "${GREEN_MIG}" --named-ports=http:8080 --zone="${_ZONE}"; \
+      \
       gcloud compute backend-services add-backend "${_BACKEND_SERVICE}" \
-        --instance-group="${GREEN_MIG}" --instance-group-zone="${_ZONE}" --global
-
-      # Wait until green becomes healthy
-      for i in {1..90}; do
-        sleep 5
+        --instance-group="${GREEN_MIG}" --instance-group-zone="${_ZONE}" --global; \
+      \
+      for i in {1..90}; do \
+        sleep 5; \
         STATE=$(gcloud compute backend-services get-health "${_BACKEND_SERVICE}" \
           --instance-group="${GREEN_MIG}" --instance-group-zone="${_ZONE}" --global \
-          --format="value(healthStatus[].state)" || true)
-        echo "health: $STATE"
-        if echo "$STATE" | grep -q "HEALTHY"; then
-          echo "Green healthy."
-          break
-        fi
-      done
-
-      # Flip traffic: remove blue MIG backend (do not delete MIG)
-      if [ -n "${_BLUE_MIG}" ]; then
+          --format="value(healthStatus[].state)" || true); \
+        echo "health: $STATE"; \
+        if echo "$STATE" | grep -q "HEALTHY"; then \
+          echo "Green healthy."; \
+          break; \
+        fi; \
+      done; \
+      \
+      if [ -n "${_BLUE_MIG}" ]; then \
         gcloud compute backend-services remove-backend "${_BACKEND_SERVICE}" \
-          --instance-group="${_BLUE_MIG}" --instance-group-zone="${_ZONE}" --global || true
-      fi
+          --instance-group="${_BLUE_MIG}" --instance-group-zone="${_ZONE}" --global || true; \
+      fi; \
       echo "Blue-green deploy finished for ${SHORT_SHA}"
 # -------------------------------------------------------------------
