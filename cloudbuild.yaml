@@ -32,7 +32,7 @@ steps:
         
         # Create instance template
         gcloud compute instance-templates create "$${TEMPLATE}" \
-          --metadata-from-file=startup-script=startup.sh \
+          --metadata-from-file=startup-script=Startup.script \
           --metadata=IMAGE='asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app',IMAGE_TAG='${SHORT_SHA}' \
           --service-account='${_VM_SA}' \
           --scopes=https://www.googleapis.com/auth/cloud-platform \
