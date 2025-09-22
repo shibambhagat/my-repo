@@ -9,7 +9,7 @@ steps:
       [
         'build',
         '-t',
-        'asia-south1-docker.pkg.dev/psyched-option-421700/artifact-repo/simple-web-app:latest',
+        'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:latest',
         '.'
       ]
 
