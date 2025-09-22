@@ -1,4 +1,4 @@
-{
+
   "name": "sudip's-poc",
   "version": "1.0.0",
   "main": "index.js",
@@ -9,5 +9,8 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": ""
+  "description": "",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
 }
