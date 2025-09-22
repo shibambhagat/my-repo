@@ -81,15 +81,12 @@ steps:
           --instance-group-zone=asia-south1-a \
           --global
 
-        # Wait for health checks
+        # Wait for health checks with correct syntax
         for i in {1..90}; do
-          HEALTH_STATUS=$(gcloud compute backend-services get-health demo-backend \
-            --instance-group=$${GREEN_MIG} \
-            --instance-group-zone=asia-south1-a \
-            --global \
-            --format="value(healthStatus[].state)")
-          echo "Health status: $${HEALTH_STATUS}"
-          if [[ "$${HEALTH_STATUS}" == *"HEALTHY"* ]]; then
+          STATUS=$(gcloud compute backend-services get-health demo-backend --global \
+            --format="get(status.healthStatus[0].healthState)")
+          echo "Health status: $${STATUS}"
+          if [[ "$${STATUS}" == "HEALTHY" ]]; then
             echo "Green instances are healthy"
             break
           fi
