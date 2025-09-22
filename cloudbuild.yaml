@@ -23,21 +23,19 @@ steps:
 images:
   - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:latest'
 
-# -------------------- append to existing cloudbuild.yaml --------------------
-# The trigger will provide SHORT_SHA automatically.
-
+# -------------------- Blue-Green Deployment Step --------------------
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'deploy-bluegreen'
   entrypoint: 'bash'
   args:
     - '-c'
-    - |
+    - >
       set -euo pipefail
       echo "Starting blue-green deploy for ${SHORT_SHA}"
       TEMPLATE="it-${SHORT_SHA}"
       GREEN_MIG="green-mig-${SHORT_SHA}"
 
-      # Create instance template using startup.sh in repo (no changes to your startup.sh)
+      # Create instance template using startup.sh in repo (no changes)
       gcloud compute instance-templates create "${TEMPLATE}" \
         --metadata-from-file=startup-script=startup.sh \
         --metadata=IMAGE='${_IMAGE}',IMAGE_TAG='${SHORT_SHA}',APP_VERSION='${SHORT_SHA}' \
@@ -72,10 +70,10 @@ images:
         fi
       done
 
-      # Flip traffic: remove blue MIG backend (do not delete the MIG)
+      # Flip traffic: remove blue MIG backend (do not delete MIG)
       if [ -n "${_BLUE_MIG}" ]; then
         gcloud compute backend-services remove-backend "${_BACKEND_SERVICE}" \
           --instance-group="${_BLUE_MIG}" --instance-group-zone="${_ZONE}" --global || true
       fi
       echo "Blue-green deploy finished for ${SHORT_SHA}"
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
