@@ -2,89 +2,91 @@ options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
-# Step 1: Build Docker image
-- name: 'gcr.io/cloud-builders/docker'
-  args:
-    - 'build'
-    - '-t'
-    - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
-    - '.'
+  # Step 1: Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
+      - '.'
 
-# Step 2: Push Docker image to Artifact Registry
-- name: 'gcr.io/cloud-builders/docker'
-  args:
-    - 'push'
-    - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
+  # Step 2: Push Docker image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
 
-# Step 3: Blue-Green Deployment
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'deploy-bluegreen'
-  entrypoint: 'bash'
-  args:
-    - '-c'
-    - |
-      set -euo pipefail
-      echo "Starting blue-green deploy for ${SHORT_SHA}"
-      TEMPLATE=it-${SHORT_SHA}
-      GREEN_MIG=green-mig-${SHORT_SHA}
-
-      # Create instance template
-      gcloud compute instance-templates create $${TEMPLATE} \
-        --metadata-from-file=startup-script=startup.sh \
-        --metadata=IMAGE='${_IMAGE}',IMAGE_TAG='${SHORT_SHA}',APP_VERSION='${SHORT_SHA}' \
-        --service-account='${_VM_SA}' \
-        --scopes=https://www.googleapis.com/auth/cloud-platform \
-        --machine-type=e2-micro
-
-      # Create green MIG
-      gcloud compute instance-groups managed create $${GREEN_MIG} \
-        --base-instance-name=web-green \
-        --template=$${TEMPLATE} \
-        --size=${_MIG_SIZE} \
-        --zone='${_ZONE}'
-
-      # Configure named ports
-      gcloud compute instance-groups set-named-ports $${GREEN_MIG} \
-        --named-ports=http:8080 \
-        --zone='${_ZONE}'
-
-      # Add green to backend service
-      gcloud compute backend-services add-backend '${_BACKEND_SERVICE}' \
-        --instance-group=$${GREEN_MIG} \
-        --instance-group-zone='${_ZONE}' \
-        --global
-
-      # Wait for green to become healthy
-      for i in {1..90}; do
-        sleep 5
-        STATE=$(gcloud compute backend-services get-health '${_BACKEND_SERVICE}' \
-          --instance-group=$${GREEN_MIG} \
-          --instance-group-zone='${_ZONE}' \
-          --global \
-          --format="value(healthStatus[].state)" || true)
-        echo "health: $STATE"
-        if echo "$STATE" | grep -q "HEALTHY"; then
-          echo "Green healthy."
-          break
+  # Step 3: Blue-Green Deployment
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-bluegreen'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        #!/bin/bash
+        set -euo pipefail
+        
+        echo "Starting blue-green deploy for ${SHORT_SHA}"
+        TEMPLATE="it-${SHORT_SHA}"
+        GREEN_MIG="green-mig-${SHORT_SHA}"
+        
+        # Create instance template
+        gcloud compute instance-templates create "$${TEMPLATE}" \
+          --metadata-from-file=startup-script=startup.sh \
+          --metadata=IMAGE='asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app',IMAGE_TAG='${SHORT_SHA}' \
+          --service-account='${_VM_SA}' \
+          --scopes=https://www.googleapis.com/auth/cloud-platform \
+          --machine-type=e2-micro
+        
+        # Create green MIG
+        gcloud compute instance-groups managed create "$${GREEN_MIG}" \
+          --base-instance-name=web-green \
+          --template="$${TEMPLATE}" \
+          --size=${_MIG_SIZE} \
+          --zone=${_ZONE}
+        
+        # Configure named ports
+        gcloud compute instance-groups set-named-ports "$${GREEN_MIG}" \
+          --named-ports=http:8080 \
+          --zone=${_ZONE}
+        
+        # Add green to backend service
+        gcloud compute backend-services add-backend ${_BACKEND_SERVICE} \
+          --instance-group="$${GREEN_MIG}" \
+          --instance-group-zone=${_ZONE} \
+          --global
+        
+        # Wait for health checks
+        for i in {1..90}; do
+          HEALTH_STATUS=$(gcloud compute backend-services get-health ${_BACKEND_SERVICE} \
+            --instance-group="$${GREEN_MIG}" \
+            --instance-group-zone=${_ZONE} \
+            --global \
+            --format="value(healthStatus[].state)")
+          echo "Health status: $${HEALTH_STATUS}"
+          if [[ "$${HEALTH_STATUS}" == *"HEALTHY"* ]]; then
+            echo "Green instances are healthy"
+            break
+          fi
+          sleep 5
+        done
+        
+        # Remove blue backend if it exists
+        if [[ -n "${_BLUE_MIG}" ]]; then
+          gcloud compute backend-services remove-backend ${_BACKEND_SERVICE} \
+            --instance-group=${_BLUE_MIG} \
+            --instance-group-zone=${_ZONE} \
+            --global || true
         fi
-      done
-
-      # Remove blue MIG from backend
-      if [ -n '${_BLUE_MIG}' ]; then
-        gcloud compute backend-services remove-backend '${_BACKEND_SERVICE}' \
-          --instance-group='${_BLUE_MIG}' \
-          --instance-group-zone='${_ZONE}' \
-          --global || true
-      fi
-      echo "Blue-green deploy finished for ${SHORT_SHA}"
+        
+        echo "Blue-green deployment completed for ${SHORT_SHA}"
 
 substitutions:
-  _ZONE: 'asia-south1-a'  # default value, can be overridden
-  _MIG_SIZE: '2'          # default value, can be overridden
-  _BLUE_MIG: ''          # default empty, will be set by trigger
-  _BACKEND_SERVICE: ''    # must be set in trigger
-  _VM_SA: ''             # must be set in trigger
-  _IMAGE: 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app'
+  _ZONE: "asia-south1-a"
+  _MIG_SIZE: "2"
+  _BLUE_MIG: ""
+  _BACKEND_SERVICE: ""
+  _VM_SA: ""
 
 images:
   - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
