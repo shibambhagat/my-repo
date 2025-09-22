@@ -1,0 +1,25 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+
+steps:
+  # Step 1: Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'build',
+        '-t',
+        'asia-south1-docker.pkg.dev/psyched-option-421700/artifact-repo/simple-web-app:latest',
+        '.'
+      ]
+
+  # Step 2: Push Docker image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'push',
+        'asia-south1-docker.pkg.dev/psyched-option-421700/artifact-repo/simple-web-app:latest'
+      ]
+
+images:
+  - 'asia-south1-docker.pkg.dev/psyched-option-421700/artifact-repo/simple-web-app:latest'
