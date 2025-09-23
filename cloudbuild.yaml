@@ -29,16 +29,15 @@ steps:
         echo "Creating startup script..."
         cat > startup.sh << 'EOL'
         #!/bin/bash
-        apt-get update -y
-        apt-get install -y docker.io
+        apt-get update -y && apt-get install -y docker.io > /dev/null 2>&1
         systemctl enable docker
         systemctl start docker
-        sleep 15
+        sleep 10
         gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
         docker pull asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}
         docker stop simple-web-app || true
         docker rm simple-web-app || true
-        docker run -d -p 8080:8080 --name simple-web-app asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}
+        docker run -d --restart=always -p 8080:8080 --name simple-web-app asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}
         echo "Container deployment completed: $(date)" >> /var/log/startup-script.log
         EOL
         chmod +x startup.sh
@@ -54,6 +53,9 @@ steps:
         echo "Starting blue-green deploy for ${SHORT_SHA}"
         TEMPLATE=it-${SHORT_SHA}
         GREEN_MIG=green-mig-${SHORT_SHA}
+
+        # Store old MIG name
+        OLD_MIG=$(gcloud compute instance-groups managed list --filter="name~'green-mig-.*'" --format="get(name)" --limit=1) || true
 
         # Create instance template
         gcloud compute instance-templates create $${TEMPLATE} \
@@ -81,25 +83,37 @@ steps:
           --instance-group-zone=asia-south1-a \
           --global
 
-        # Wait for health checks with correct syntax
-        for i in {1..90}; do
+        # Wait for health checks
+        echo "Waiting for new instances to become healthy..."
+        for i in {1..36}; do
           STATUS=$(gcloud compute backend-services get-health demo-backend --global \
             --format="get(status.healthStatus[0].healthState)")
-          echo "Health status: $${STATUS}"
+          echo "Health check attempt $i: $${STATUS}"
           if [[ "$${STATUS}" == "HEALTHY" ]]; then
-            echo "Green instances are healthy"
+            echo "✓ New instances are healthy"
             break
           fi
           sleep 5
         done
 
-        # Remove blue backend (current MIG)
-        gcloud compute backend-services remove-backend demo-backend \
-          --instance-group=node-app-template-v2 \
-          --instance-group-zone=asia-south1-a \
-          --global || true
+        # Remove old backend and cleanup
+        if [[ -n "$${OLD_MIG}" ]]; then
+          echo "Removing old MIG from backend service..."
+          gcloud compute backend-services remove-backend demo-backend \
+            --instance-group=$${OLD_MIG} \
+            --instance-group-zone=asia-south1-a \
+            --global --quiet || true
+          
+          echo "Cleaning up old MIG..."
+          gcloud compute instance-groups managed delete $${OLD_MIG} \
+            --zone=asia-south1-a --quiet || true
+          
+          OLD_TEMPLATE="it-${OLD_MIG#green-mig-}"
+          echo "Cleaning up old template..."
+          gcloud compute instance-templates delete $${OLD_TEMPLATE} --quiet || true
+        fi
 
-        echo "Blue-green deployment completed for ${SHORT_SHA}"
+        echo "✓ Blue-green deployment completed for ${SHORT_SHA}"
 
 images:
   - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
