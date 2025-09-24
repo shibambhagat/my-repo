@@ -83,7 +83,7 @@ steps:
         # Add the 'green' label after creation.
         gcloud compute instance-groups managed update $${GREEN_MIG} \
           --zone=$${ZONE} \
-          --update-labels=status=green
+          --labels=status=green
 
         echo "Configuring named ports..."
         gcloud compute instance-groups set-named-ports $${GREEN_MIG} \
@@ -156,7 +156,7 @@ steps:
 
         # Update labels on the new MIG to make it the "blue" one for the next deployment
         gcloud compute instance-groups managed update $${GREEN_MIG} \
-            --zone=$${ZONE} --update-labels=status=blue
+            --zone=$${ZONE} --labels=status=blue
         
         echo "✓ Deployment completed successfully. Old resources cleaned up."
 
