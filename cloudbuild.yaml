@@ -20,7 +20,7 @@ steps:
         'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
       ]
 
-  # Step 3: Create startup script that auto-pulls image & runs it
+  # Step 3: Create startup script
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
@@ -44,7 +44,7 @@ steps:
         EOL
         chmod +x startup.sh
 
-  # Step 4: Blue-Green Deployment with zero downtime
+  # Step 4: Blue-Green Deployment with no downtime
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-bluegreen'
     entrypoint: 'bash'
@@ -59,7 +59,7 @@ steps:
 
         echo "🔵 Starting blue-green deploy for commit $SHORT_SHA..."
 
-        # Detect current active MIG (blue)
+        # Detect current active MIG from backend service
         BLUE_MIG=$(gcloud compute backend-services describe demo-backend --global \
           --format="value(backends.instanceGroup)" \
           | grep "green-mig-" | sed 's#.*/##' | head -n 1 || true)
@@ -69,7 +69,7 @@ steps:
         echo "📦 Creating instance template..."
         gcloud compute instance-templates create $TEMPLATE \
           --metadata-from-file=startup-script=startup.sh \
-          --metadata=IMAGE="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app",IMAGE_TAG="${SHORT_SHA}" \
+          --metadata=IMAGE="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app",IMAGE_TAG="$SHORT_SHA" \
           --service-account="469028311605-compute@developer.gserviceaccount.com" \
           --scopes=https://www.googleapis.com/auth/cloud-platform \
           --machine-type=e2-micro
@@ -81,12 +81,12 @@ steps:
           --size=2 \
           --zone=$ZONE
 
-        echo "Setting named ports..."
+        echo "Configuring named ports..."
         gcloud compute instance-groups set-named-ports $GREEN_MIG \
           --named-ports=http:8080 \
           --zone=$ZONE
 
-        echo "➕ Adding new MIG to backend with 0% traffic..."
+        echo "➕ Adding new MIG to backend (0% traffic)..."
         gcloud compute backend-services add-backend demo-backend \
           --instance-group=$GREEN_MIG \
           --instance-group-zone=$ZONE \
@@ -95,33 +95,33 @@ steps:
           --max-utilization=0.8 \
           --capacity-scaler=0.0
 
-        echo "⏳ Waiting for instances in new MIG to boot..."
+        echo "⏳ Waiting for new MIG instances to initialize..."
         sleep 60
 
-        echo "Half traffic -> New MIG..."
+        echo "➡️ Shifting 50% traffic..."
         gcloud compute backend-services update-backend demo-backend \
           --instance-group=$GREEN_MIG \
           --instance-group-zone=$ZONE \
           --global \
           --capacity-scaler=0.5
 
-        echo "Checking health..."
+        echo "Checking health status..."
         for i in {1..12}; do
           STATUS=$(gcloud compute backend-services get-health demo-backend --global \
             --format='get(status.healthStatus[].healthState)' || true)
           echo "Health check $i: $STATUS"
           if [[ "$STATUS" == *"HEALTHY"* ]]; then
-            echo "✅ New MIG is healthy"
+            echo "✅ New MIG healthy!"
             sleep 20
-            echo "Switching 100% traffic..."
+            echo "➡️ Moving to 100% traffic..."
             gcloud compute backend-services update-backend demo-backend \
               --instance-group=$GREEN_MIG \
               --instance-group-zone=$ZONE \
               --global \
               --capacity-scaler=1.0
-            # Drain blue MIG if exists
+
             if [[ -n "$BLUE_MIG" ]]; then
-              echo "♻️ Draining blue MIG..."
+              echo "♻️ Draining old MIG: $BLUE_MIG..."
               gcloud compute backend-services update-backend demo-backend \
                 --instance-group=$BLUE_MIG \
                 --instance-group-zone=$ZONE \
@@ -138,7 +138,7 @@ steps:
               OLD_TEMPLATE="it-${BLUE_MIG#green-mig-}"
               gcloud compute instance-templates delete $OLD_TEMPLATE --quiet || true
             fi
-            echo "🎉 Zero-downtime blue-green deployment done!"
+            echo "🎉 Deployment complete without downtime!"
             break
           fi
           sleep 10
