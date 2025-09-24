@@ -69,7 +69,7 @@ steps:
         echo "Creating new instance template..."
         gcloud compute instance-templates create $${TEMPLATE} \
           --metadata-from-file=startup-script=startup.sh \
-          --metadata=IMAGE_TAG='${SHORT_SHA}' \
+          --metadata=IMAGE_TAG=${SHORT_SHA} \
           --service-account='469028311605-compute@developer.gserviceaccount.com' \
           --scopes=https://www.googleapis.com/auth/cloud-platform \
           --machine-type=e2-micro \
