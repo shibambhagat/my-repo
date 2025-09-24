@@ -42,7 +42,7 @@ steps:
         EOL
         chmod +x startup.sh
 
-  # Step 4: Blue-Green Deployment
+  # Step 4: Blue-Green Deployment with verified cleanup
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-bluegreen'
     entrypoint: 'bash'
@@ -53,9 +53,6 @@ steps:
         echo "Starting blue-green deploy for ${SHORT_SHA}"
         TEMPLATE=it-${SHORT_SHA}
         GREEN_MIG=green-mig-${SHORT_SHA}
-
-        # Store old MIG name
-        OLD_MIG=$(gcloud compute instance-groups managed list --filter="name~'green-mig-.*'" --format="get(name)" --limit=1) || true
 
         # Create instance template
         gcloud compute instance-templates create $${TEMPLATE} \
@@ -96,24 +93,48 @@ steps:
           sleep 5
         done
 
-        # Remove old backend and cleanup
-        if [[ -n "$${OLD_MIG}" ]]; then
-          echo "Removing old MIG from backend service..."
-          gcloud compute backend-services remove-backend demo-backend \
-            --instance-group=$${OLD_MIG} \
-            --instance-group-zone=asia-south1-a \
-            --global --quiet || true
+        # Enhanced cleanup process
+        echo "Starting comprehensive cleanup..."
+        
+        # List all MIGs except the current one
+        OLD_MIGS=$(gcloud compute instance-groups managed list \
+          --filter="NOT name='${GREEN_MIG}'" \
+          --format="get(name)" \
+          --zones=asia-south1-a) || true
+
+        if [[ -n "$${OLD_MIGS}" ]]; then
+          echo "Found old MIGs to cleanup: $${OLD_MIGS}"
           
-          echo "Cleaning up old MIG..."
-          gcloud compute instance-groups managed delete $${OLD_MIG} \
-            --zone=asia-south1-a --quiet || true
-          
-          OLD_TEMPLATE="it-${OLD_MIG#green-mig-}"
-          echo "Cleaning up old template..."
-          gcloud compute instance-templates delete $${OLD_TEMPLATE} --quiet || true
+          while IFS= read -r OLD_MIG; do
+            if [[ -n "$${OLD_MIG}" ]]; then
+              echo "Processing cleanup for MIG: $${OLD_MIG}"
+              
+              # Remove from backend service first
+              gcloud compute backend-services remove-backend demo-backend \
+                --instance-group=$${OLD_MIG} \
+                --instance-group-zone=asia-south1-a \
+                --global --quiet || true
+              
+              # Delete the MIG
+              gcloud compute instance-groups managed delete $${OLD_MIG} \
+                --zone=asia-south1-a --quiet || true
+              
+              # Delete corresponding template if it follows the naming pattern
+              if [[ $${OLD_MIG} == green-mig-* ]]; then
+                OLD_TEMPLATE="it-${OLD_MIG#green-mig-}"
+                echo "Deleting template: $${OLD_TEMPLATE}"
+                gcloud compute instance-templates delete $${OLD_TEMPLATE} --quiet || true
+              elif [[ $${OLD_MIG} == "node-app-template-v2" ]]; then
+                echo "Cleaning up node-app-template"
+                gcloud compute instance-templates delete "node-app-template" --quiet || true
+              fi
+            fi
+          done <<< "$${OLD_MIGS}"
+        else
+          echo "No old MIGs found for cleanup"
         fi
 
-        echo "✓ Blue-green deployment completed for ${SHORT_SHA}"
+        echo "✓ Blue-green deployment and cleanup completed for ${SHORT_SHA}"
 
 images:
   - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
