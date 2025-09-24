@@ -1,6 +1,4 @@
 options:
-  # This option is crucial to resolve the 'logsBucket' error when using a custom service account.
-  # Replace 'your-project-id' with your actual Google Cloud Project ID.
   logsBucket: 'gs://third-octagon-465311-r5-cloudbuild-logs'
   logging: CLOUD_LOGGING_ONLY
 
