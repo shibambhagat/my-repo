@@ -1,4 +1,5 @@
 options:
+  # This is configured at the trigger level, not here, to avoid errors.
   logging: CLOUD_LOGGING_ONLY
 
 steps:
@@ -42,7 +43,7 @@ steps:
         EOL
         chmod +x startup.sh
 
-  # Step 4: Blue-Green Deployment
+  # Step 4: Blue-Green Deployment (Corrected Logic)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-bluegreen'
     entrypoint: 'bash'
@@ -54,12 +55,14 @@ steps:
         TEMPLATE=it-${SHORT_SHA}
         GREEN_MIG=green-mig-${SHORT_SHA}
         ZONE=asia-south1-a
+        BACKEND_SERVICE=demo-backend
 
-        # Get current active MIG
-        BLUE_MIG=$(gcloud compute instance-groups managed list \
-          --zones=$${ZONE} \
-          --format="get(name)" | grep "green-mig-" | head -n 1) || true
-        echo "Current active MIG: $${BLUE_MIG}"
+        # Find the current 'blue' MIG, if it exists.
+        BLUE_MIG=$(gcloud compute instance-groups managed list --zones=$${ZONE} --format="value(name)" --filter="labels.status=blue" || true)
+        
+        if [[ -z "$${BLUE_MIG}" ]]; then
+            echo "No 'blue' MIG found. This is the first deployment."
+        fi
 
         echo "Creating new instance template..."
         gcloud compute instance-templates create $${TEMPLATE} \
@@ -76,15 +79,16 @@ steps:
           --base-instance-name=web-green \
           --template=$${TEMPLATE} \
           --size=2 \
-          --zone=$${ZONE}
+          --zone=$${ZONE} \
+          --labels=status=green
 
         echo "Configuring named ports..."
         gcloud compute instance-groups set-named-ports $${GREEN_MIG} \
           --named-ports=http:8080 \
           --zone=$${ZONE}
 
-        echo "Adding new MIG to backend service with initial 0% traffic..."
-        gcloud compute backend-services add-backend demo-backend \
+        # Add the new MIG to the backend service with 0% traffic.
+        gcloud compute backend-services add-backend $${BACKEND_SERVICE} \
           --instance-group=$${GREEN_MIG} \
           --instance-group-zone=$${ZONE} \
           --global \
@@ -92,74 +96,66 @@ steps:
           --max-utilization=0.8 \
           --capacity-scaler=0.0
 
-        echo "Waiting for new instances to initialize..."
-        sleep 60  # Allow instances to fully start
-
-        echo "Gradually increasing traffic to new instances..."
-        gcloud compute backend-services update-backend demo-backend \
+        echo "Waiting for new instances to become healthy..."
+        # Poll the health status until both instances are HEALTHY
+        for i in {1..24}; do # Wait up to 4 minutes (24 * 10 seconds)
+          HEALTH_STATUS=$(gcloud compute backend-services get-health $${BACKEND_SERVICE} --global --format="value(backends[0].healthStatus[].healthState)" || true)
+          echo "Health check attempt $i: $${HEALTH_STATUS}"
+          
+          # Count the number of HEALTHY instances
+          HEALTHY_COUNT=$(echo "$${HEALTH_STATUS}" | tr ' ' '\n' | grep -c 'HEALTHY')
+          
+          if [[ "$${HEALTHY_COUNT}" -eq 2 ]]; then
+            echo "✓ All new instances confirmed healthy."
+            break
+          fi
+          
+          echo "Not all instances healthy. Retrying in 10 seconds..."
+          sleep 10
+        done
+        
+        if [[ "$${HEALTHY_COUNT}" -ne 2 ]]; then
+          echo "Error: New instances did not become healthy within the time limit. Aborting deployment."
+          exit 1
+        fi
+        
+        echo "Shifting traffic to new instances..."
+        gcloud compute backend-services update-backend $${BACKEND_SERVICE} \
           --instance-group=$${GREEN_MIG} \
           --instance-group-zone=$${ZONE} \
           --global \
-          --capacity-scaler=0.5
+          --capacity-scaler=1.0
 
-        echo "Waiting for health checks..."
-        for i in {1..12}; do  # 2 minute maximum wait
-          STATUS=$(gcloud compute backend-services get-health demo-backend --global \
-            --format='get(status.healthStatus[].healthState)' || true)
-          
-          echo "Health check attempt $i: $${STATUS}"
-          
-          if [[ "$${STATUS}" == *"HEALTHY"* ]]; then
-            echo "New instances becoming healthy, waiting for stability..."
-            sleep 30
-            
-            # Verify again after wait
-            STATUS=$(gcloud compute backend-services get-health demo-backend --global \
-              --format='get(status.healthStatus[].healthState)' || true)
-            
-            if [[ "$${STATUS}" == *"HEALTHY"* ]]; then
-              echo "✓ New instances confirmed healthy"
-              
-              # Increase to full traffic
-              gcloud compute backend-services update-backend demo-backend \
-                --instance-group=$${GREEN_MIG} \
-                --instance-group-zone=$${ZONE} \
-                --global \
-                --capacity-scaler=1.0
+        echo "Waiting for traffic to stabilize on new MIG..."
+        sleep 30
 
-              sleep 30  # Allow traffic to stabilize
-              
-              if [[ -n "$${BLUE_MIG}" ]]; then
-                echo "Draining connections from old MIG..."
-                gcloud compute backend-services update-backend demo-backend \
-                  --instance-group=$${BLUE_MIG} \
-                  --instance-group-zone=$${ZONE} \
-                  --global \
-                  --capacity-scaler=0.0
+        if [[ -n "$${BLUE_MIG}" ]]; then
+          echo "Draining connections from old MIG ($${BLUE_MIG})..."
+          gcloud compute backend-services update-backend $${BACKEND_SERVICE} \
+            --instance-group=$${BLUE_MIG} \
+            --instance-group-zone=$${ZONE} \
+            --global \
+            --capacity-scaler=0.0
 
-                sleep 30  # Allow connections to drain
+          # Remove the old MIG from the backend service immediately after draining.
+          gcloud compute backend-services remove-backend $${BACKEND_SERVICE} \
+            --instance-group=$${BLUE_MIG} \
+            --instance-group-zone=$${ZONE} \
+            --global --quiet
+        fi
+        
+        echo "Deleting old resources..."
+        if [[ -n "$${BLUE_MIG}" ]]; then
+          gcloud compute instance-groups managed delete $${BLUE_MIG} --zone=$${ZONE} --quiet || true
+          OLD_TEMPLATE=$(gcloud compute instance-templates list --format="value(name)" --filter="name ~ ^it-" | grep -v "$${TEMPLATE}" || true)
+          gcloud compute instance-templates delete $${OLD_TEMPLATE} --quiet || true
+        fi
 
-                echo "Removing old MIG from backend..."
-                gcloud compute backend-services remove-backend demo-backend \
-                  --instance-group=$${BLUE_MIG} \
-                  --instance-group-zone=$${ZONE} \
-                  --global --quiet
-
-                echo "Deleting old MIG..."
-                gcloud compute instance-groups managed delete $${BLUE_MIG} \
-                  --zone=$${ZONE} --quiet
-
-                echo "Cleaning up old template..."
-                OLD_TEMPLATE="it-${BLUE_MIG#green-mig-}"
-                gcloud compute instance-templates delete $${OLD_TEMPLATE} --quiet || true
-              fi
-              
-              echo "✓ Deployment completed successfully"
-              break
-            fi
-          fi
-          sleep 10
-        done
+        # Update labels on the new MIG to make it the "blue" one for the next deployment
+        gcloud compute instance-groups managed update $${GREEN_MIG} \
+            --zone=$${ZONE} --update-labels=status=blue
+        
+        echo "✓ Deployment completed successfully. Old resources cleaned up."
 
 images:
   - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
