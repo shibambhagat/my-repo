@@ -22,51 +22,52 @@ steps:
         'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
       ]
 
-  # Step 3: Create startup script (unquoted heredoc so ${SHORT_SHA} expands here)
+  # Step 3: Create startup script safely (single-quoted heredoc + placeholder replacement)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Creating startup script..."
-        # NOTE: heredoc is NOT quoted so ${SHORT_SHA} expands into the file content
-        cat > startup.sh <<EOL
+        echo "Creating startup script (safe heredoc)..."
+        # Use single-quoted heredoc so no shell expansion occurs while building this file.
+        # Put a placeholder __SHORT_SHA__ for the image tag and replace it with ${SHORT_SHA} below.
+        cat > startup.sh <<'EOL'
         #!/bin/bash
         set -euxo pipefail
         LOG=/var/log/startup-script.log
-        echo "Startup begin: \$(date)" >> \$LOG
+        echo "Startup begin: $(date)" >> $LOG
 
-        apt-get update -y >> \$LOG 2>&1 || true
+        apt-get update -y >> $LOG 2>&1 || true
         apt-get install -y docker.io curl > /dev/null 2>&1 || true
         systemctl enable docker || true
         systemctl start docker || true
         sleep 5
 
-        IMAGE="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}"
+        IMAGE="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:__SHORT_SHA__"
 
         # Try docker pull with retries/backoff
         MAX_PULL=8
         PULL_DELAY=5
         count=0
-        while [ \$count -lt \$MAX_PULL ]; do
-          if docker pull "\$IMAGE" >> \$LOG 2>&1; then
-            echo "Pulled \$IMAGE" >> \$LOG
+        while [ $count -lt $MAX_PULL ]; do
+          if docker pull "$IMAGE" >> $LOG 2>&1; then
+            echo "Pulled $IMAGE" >> $LOG
             break
           fi
-          count=\$((count+1))
-          echo "docker pull attempt \$count failed, sleeping \$PULL_DELAYs" >> \$LOG
-          sleep \$PULL_DELAY
+          count=$((count+1))
+          echo "docker pull attempt $count failed, sleeping $PULL_DELAY s" >> $LOG
+          sleep $PULL_DELAY
         done
-        if [ \$count -ge \$MAX_PULL ]; then
-          echo "Failed to pull image \$IMAGE after \$MAX_PULL attempts" >> \$LOG
+        if [ $count -ge $MAX_PULL ]; then
+          echo "Failed to pull image $IMAGE after $MAX_PULL attempts" >> $LOG
           exit 1
         fi
 
-        docker stop simple-web-app || true >> \$LOG 2>&1
-        docker rm simple-web-app || true >> \$LOG 2>&1
+        docker stop simple-web-app || true >> $LOG 2>&1
+        docker rm simple-web-app || true >> $LOG 2>&1
 
-        docker run -d --restart=always -p 8080:8080 --name simple-web-app "\$IMAGE" >> \$LOG 2>&1 || {
-          echo "Failed to start container" >> \$LOG
+        docker run -d --restart=always -p 8080:8080 --name simple-web-app "$IMAGE" >> $LOG 2>&1 || {
+          echo "Failed to start container" >> $LOG
           exit 1
         }
 
@@ -74,18 +75,21 @@ steps:
         MAX_HEALTH_WAIT=120
         HEALTH_PATH="/"  # adjust if your app uses /health
         elapsed=0
-        until curl -sf --max-time 2 http://127.0.0.1:8080\$HEALTH_PATH > /dev/null; do
+        until curl -sf --max-time 2 http://127.0.0.1:8080$HEALTH_PATH > /dev/null; do
           sleep 2
-          elapsed=\$((elapsed+2))
-          echo "Waiting for local app response... elapsed=\$elapsed" >> \$LOG
-          if [ \$elapsed -ge \$MAX_HEALTH_WAIT ]; then
-            echo "App did not respond within \$MAX_HEALTH_WAIT seconds" >> \$LOG
+          elapsed=$((elapsed+2))
+          echo "Waiting for local app response... elapsed=$elapsed" >> $LOG
+          if [ $elapsed -ge $MAX_HEALTH_WAIT ]; then
+            echo "App did not respond within $MAX_HEALTH_WAIT seconds" >> $LOG
             exit 1
           fi
         done
 
-        echo "Local app responded, startup complete: \$(date)" >> \$LOG
+        echo "Local app responded, startup complete: $(date)" >> $LOG
         EOL
+
+        # Replace placeholder with the actual SHORT_SHA (Cloud Build substitutes ${SHORT_SHA} here)
+        sed -i "s|__SHORT_SHA__|${SHORT_SHA}|g" startup.sh
         chmod +x startup.sh
 
   # Step 4: Blue-Green Deployment (hardened wait + exact-health checks + autoscaler)
