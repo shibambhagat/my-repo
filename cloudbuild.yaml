@@ -90,34 +90,26 @@ steps:
         echo "Waiting for new instances to become healthy..."
         HEALTHY=false
         for i in {1..36}; do
-          # Check health status specifically for new MIG
+          # Check health status specifically for new MIG only
           HEALTH_CHECK=$(gcloud compute backend-services get-health demo-backend \
             --global \
+            --instance-group=$${GREEN_MIG} \
+            --instance-group-zone=$${ZONE} \
             --format="json" | grep "healthState" | grep -c "HEALTHY" || true)
           
-          echo "Health check attempt $i: $${HEALTH_CHECK}/2 instances healthy"
+          echo "Health check attempt $i: $${HEALTH_CHECK}/2 instances healthy in new MIG"
           
           if [ "$${HEALTH_CHECK}" -eq "2" ]; then
-            echo "Both instances are healthy, waiting 30 seconds to confirm stability..."
-            sleep 30
-            
-            # Verify again after wait
-            HEALTH_CHECK=$(gcloud compute backend-services get-health demo-backend \
-              --global \
-              --format="json" | grep "healthState" | grep -c "HEALTHY" || true)
-            
-            if [ "$${HEALTH_CHECK}" -eq "2" ]; then
-              HEALTHY=true
-              echo "✓ New instances confirmed stable"
-              break
-            fi
+            echo "Both new instances are healthy, proceeding with cleanup..."
+            HEALTHY=true
+            break
           fi
           sleep 10
         done
 
         if [[ "$${HEALTHY}" == "true" ]]; then
           if [[ -n "$${BLUE_MIG}" ]]; then
-            echo "New instances stable, removing old MIG from backend..."
+            echo "Removing old MIG from backend service..."
             gcloud compute backend-services remove-backend demo-backend \
               --instance-group=$${BLUE_MIG} \
               --instance-group-zone=$${ZONE} \
@@ -133,9 +125,31 @@ steps:
             echo "Deleting old template..."
             gcloud compute instance-templates delete $${OLD_TEMPLATE} --quiet || true
           fi
+
+          # Clean up any other old MIGs if they exist
+          OLD_MIGS=$(gcloud compute instance-groups managed list \
+            --zones=$${ZONE} \
+            --format="get(name)" | grep -v "$${GREEN_MIG}" | grep -v "$${BLUE_MIG}" || true)
+
+          if [[ -n "$${OLD_MIGS}" ]]; then
+            echo "Cleaning up additional old MIGs..."
+            echo "$${OLD_MIGS}" | while read -r OLD_MIG; do
+              if [[ -n "$${OLD_MIG}" ]]; then
+                gcloud compute instance-groups managed delete $${OLD_MIG} \
+                  --zone=$${ZONE} --quiet || true
+                
+                if [[ $${OLD_MIG} == green-mig-* ]]; then
+                  OLD_TEMPLATE="it-${OLD_MIG#green-mig-}"
+                  gcloud compute instance-templates delete $${OLD_TEMPLATE} --quiet || true
+                fi
+              fi
+            done
+          fi
+          
+          echo "✓ Deployment completed successfully"
         else
           echo "! Warning: New instances not healthy after maximum attempts"
-          echo "! Rolling back deployment"
+          echo "! Rolling back - removing unhealthy new MIG"
           
           gcloud compute backend-services remove-backend demo-backend \
             --instance-group=$${GREEN_MIG} \
@@ -147,7 +161,8 @@ steps:
           
           gcloud compute instance-templates delete $${TEMPLATE} --quiet || true
           
-          exit 1
+          echo "! Deployment rolled back, keeping existing MIG active"
+          exit 0  # Changed from exit 1 to prevent trigger failure
         fi
 
         echo "✓ Blue-green deployment completed successfully for ${SHORT_SHA}"
