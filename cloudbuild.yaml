@@ -1,7 +1,6 @@
 options:
   logging: CLOUD_LOGGING_ONLY
-  # Optional: tune if your deploy often runs long
-  # timeout: "1800s"
+  timeout: "2400s"  # 40 minutes total timeout
 
 steps:
   # Step 1: Build Docker image
@@ -14,7 +13,7 @@ steps:
         '.'
       ]
 
-  # Step 2: Push Docker image to Artifact Registry
+  # Step 2: Push Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args:
       [
@@ -22,77 +21,65 @@ steps:
         'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
       ]
 
-  # Step 3: Create startup script safely (single-quoted heredoc + placeholder replacement)
+  # Step 3: Create startup script
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Creating startup script (safe heredoc)..."
-        # Use single-quoted heredoc so no shell expansion occurs while building this file.
-        # Put a placeholder __SHORT_SHA__ for the image tag and replace it with ${SHORT_SHA} below.
         cat > startup.sh <<'EOL'
         #!/bin/bash
         set -euxo pipefail
         LOG=/var/log/startup-script.log
-        echo "Startup begin: $(date)" >> $LOG
 
-        apt-get update -y >> $LOG 2>&1 || true
-        apt-get install -y docker.io curl > /dev/null 2>&1 || true
-        systemctl enable docker || true
-        systemctl start docker || true
+        echo "Starting deployment: $(date)" >> $LOG
+
+        # Install and configure Docker
+        apt-get update -y && apt-get install -y docker.io curl >> $LOG 2>&1
+        systemctl enable docker >> $LOG 2>&1
+        systemctl start docker >> $LOG 2>&1
         sleep 5
 
+        # Configure Docker auth and pull image
+        gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet >> $LOG 2>&1
+        
         IMAGE="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:__SHORT_SHA__"
-
-        # Try docker pull with retries/backoff
-        MAX_PULL=8
-        PULL_DELAY=5
-        count=0
-        while [ $count -lt $MAX_PULL ]; do
+        
+        # Pull with retries
+        for i in {1..5}; do
           if docker pull "$IMAGE" >> $LOG 2>&1; then
-            echo "Pulled $IMAGE" >> $LOG
+            echo "Successfully pulled image on attempt $i" >> $LOG
             break
           fi
-          count=$((count+1))
-          echo "docker pull attempt $count failed, sleeping $PULL_DELAY s" >> $LOG
-          sleep $PULL_DELAY
+          echo "Pull attempt $i failed, retrying..." >> $LOG
+          sleep 10
         done
-        if [ $count -ge $MAX_PULL ]; then
-          echo "Failed to pull image $IMAGE after $MAX_PULL attempts" >> $LOG
-          exit 1
-        fi
 
+        # Clean up any existing container
         docker stop simple-web-app || true >> $LOG 2>&1
         docker rm simple-web-app || true >> $LOG 2>&1
 
-        docker run -d --restart=always -p 8080:8080 --name simple-web-app "$IMAGE" >> $LOG 2>&1 || {
-          echo "Failed to start container" >> $LOG
-          exit 1
-        }
+        # Run new container
+        docker run -d --restart=always -p 8080:8080 --name simple-web-app "$IMAGE" >> $LOG 2>&1
 
-        # Wait for application to respond locally before letting health checks hit it.
-        MAX_HEALTH_WAIT=120
-        HEALTH_PATH="/"  # adjust if your app uses /health
-        elapsed=0
-        until curl -sf --max-time 2 http://127.0.0.1:8080$HEALTH_PATH > /dev/null; do
-          sleep 2
-          elapsed=$((elapsed+2))
-          echo "Waiting for local app response... elapsed=$elapsed" >> $LOG
-          if [ $elapsed -ge $MAX_HEALTH_WAIT ]; then
-            echo "App did not respond within $MAX_HEALTH_WAIT seconds" >> $LOG
-            exit 1
+        # Wait for application to be ready
+        for i in {1..60}; do
+          if curl -sf http://localhost:8080/health >> $LOG 2>&1; then
+            echo "Application is ready" >> $LOG
+            exit 0
           fi
+          echo "Waiting for application to be ready... attempt $i" >> $LOG
+          sleep 5
         done
 
-        echo "Local app responded, startup complete: $(date)" >> $LOG
+        echo "Failed to start application" >> $LOG
+        exit 1
         EOL
 
-        # Replace placeholder with the actual SHORT_SHA (Cloud Build substitutes ${SHORT_SHA} here)
         sed -i "s|__SHORT_SHA__|${SHORT_SHA}|g" startup.sh
         chmod +x startup.sh
 
-  # Step 4: Blue-Green Deployment (hardened wait + exact-health checks + autoscaler)
+  # Step 4: Blue-Green Deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-bluegreen'
     entrypoint: 'bash'
@@ -100,41 +87,66 @@ steps:
       - '-c'
       - |
         set -euo pipefail
-        echo "Starting blue-green deploy for ${SHORT_SHA}"
-        TEMPLATE=it-${SHORT_SHA}
-        GREEN_MIG=green-mig-${SHORT_SHA}
-        ZONE=asia-south1-a
-        SIZE=2              # desired size
-        HEALTH_WAIT_RETRIES=18  # ~ up to 180s for health stabilization
+        
+        # Configuration
+        TEMPLATE="it-${SHORT_SHA}"
+        GREEN_MIG="green-mig-${SHORT_SHA}"
+        ZONE="asia-south1-a"
+        MIN_INSTANCES=2
+        MAX_INSTANCES=6
+        BACKEND_SERVICE="demo-backend"
 
-        # Find current active MIG (old blue)
+        echo "Starting deployment for ${SHORT_SHA}"
+
+        # Get current active MIG
         BLUE_MIG=$(gcloud compute instance-groups managed list \
           --zones=$${ZONE} \
           --format="get(name)" | grep "green-mig-" | head -n 1) || true
+        
         echo "Current active MIG: $${BLUE_MIG}"
 
-        echo "Creating new instance template..."
+        # Create new instance template
+        echo "Creating instance template..."
         gcloud compute instance-templates create $${TEMPLATE} \
           --metadata-from-file=startup-script=startup.sh \
           --metadata=IMAGE='asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app',IMAGE_TAG='${SHORT_SHA}' \
           --service-account='469028311605-compute@developer.gserviceaccount.com' \
           --scopes=https://www.googleapis.com/auth/cloud-platform \
-          --machine-type=e2-micro
+          --machine-type=e2-micro \
+          --tags=allow-health-check
 
+        # Create new MIG
         echo "Creating new MIG..."
         gcloud compute instance-groups managed create $${GREEN_MIG} \
           --base-instance-name=web-green \
           --template=$${TEMPLATE} \
-          --size=$${SIZE} \
-          --zone=$${ZONE}
+          --size=$${MIN_INSTANCES} \
+          --zone=$${ZONE} \
+          --initial-delay=300
 
-        echo "Configuring named ports..."
+        # Configure named ports
         gcloud compute instance-groups set-named-ports $${GREEN_MIG} \
           --named-ports=http:8080 \
           --zone=$${ZONE}
 
-        echo "Adding new MIG to backend service with initial 0% traffic..."
-        gcloud compute backend-services add-backend demo-backend \
+        # Configure autoscaling
+        echo "Configuring autoscaling..."
+        gcloud compute instance-groups managed set-autoscaling $${GREEN_MIG} \
+          --zone=$${ZONE} \
+          --min-num-replicas=$${MIN_INSTANCES} \
+          --max-num-replicas=$${MAX_INSTANCES} \
+          --target-load-balancing-utilization=0.8 \
+          --cool-down-period=90
+
+        # Wait for instances to be ready
+        echo "Waiting for instances to be ready..."
+        gcloud compute instance-groups managed wait-until-stable $${GREEN_MIG} \
+          --zone=$${ZONE} \
+          --timeout=600
+
+        # Add to backend service with zero traffic
+        echo "Adding to backend service..."
+        gcloud compute backend-services add-backend $${BACKEND_SERVICE} \
           --instance-group=$${GREEN_MIG} \
           --instance-group-zone=$${ZONE} \
           --global \
@@ -142,76 +154,55 @@ steps:
           --max-utilization=0.8 \
           --capacity-scaler=0.0
 
-        # ---- AUTOSCALER: minimal & safe (LB-based). Inserted here to make MIG autoscale on load.
-        # Keeps baseline of 2, scales up to 6 based on LB utilization.
-        gcloud compute instance-groups managed set-autoscaling $${GREEN_MIG} \
-          --zone=$${ZONE} \
-          --min-num-replicas=2 \
-          --max-num-replicas=6 \
-          --target-load-balancing-utilization=0.8 \
-          --cool-down-period=90
-
-        echo "Waiting for instances to be RUNNING..."
-        for i in {1..30}; do
-          RUNNING_COUNT=$(gcloud compute instance-groups managed list-instances $${GREEN_MIG} --zone=$${ZONE} --format='get(instanceStatus)' | grep -c RUNNING || true)
-          echo "RUNNING_COUNT=$${RUNNING_COUNT} (expected $${SIZE})"
-          if [ "$${RUNNING_COUNT}" -ge "$${SIZE}" ]; then
-            echo "All instances RUNNING"
-            break
-          fi
-          sleep 5
-        done
-
-        echo "Polling backend-service health for new MIG until all instances are HEALTHY..."
-        healthy_count=0
-        attempt=0
-        while [ $${attempt} -lt $${HEALTH_WAIT_RETRIES} ]; do
-          attempt=$$((attempt+1))
-          STATUS=$(gcloud compute backend-services get-health demo-backend \
-            --global \
+        # Verify health and gradually increase traffic
+        echo "Starting health checks..."
+        for percentage in 0 20 40 60 80 100; do
+          echo "Setting traffic to $${percentage}%..."
+          gcloud compute backend-services update-backend $${BACKEND_SERVICE} \
             --instance-group=$${GREEN_MIG} \
             --instance-group-zone=$${ZONE} \
-            --format='get(status.healthStatus[].healthState)' || true)
+            --global \
+            --capacity-scaler=$(echo "scale=2; $${percentage}/100" | bc)
 
-          HEALTHY_COUNT=$(echo "$${STATUS}" | grep -o HEALTHY | wc -l || true)
-          echo "Attempt $${attempt}: HEALTHY_COUNT=$${HEALTHY_COUNT} / $${SIZE}  raw-status='$${STATUS}'"
-
-          if [ "$${HEALTHY_COUNT}" -ge "$${SIZE}" ]; then
-            echo "New MIG instances are healthy ($${HEALTHY_COUNT}/$${SIZE}). Proceeding to traffic switch."
-            healthy_count=$${HEALTHY_COUNT}
-            break
-          fi
-          sleep 10
+          # Wait for health checks
+          for i in {1..10}; do
+            HEALTHY_COUNT=$(gcloud compute backend-services get-health $${BACKEND_SERVICE} \
+              --global \
+              --filter="instanceGroup:$${GREEN_MIG}" \
+              --format='value(status.healthStatus[].healthState)' | grep -c HEALTHY || echo "0")
+            
+            if [ "$${HEALTHY_COUNT}" -ge "$${MIN_INSTANCES}" ]; then
+              echo "✓ Instances healthy at $${percentage}% traffic"
+              break
+            fi
+            
+            if [ $i -eq 10 ]; then
+              echo "! Health check failed at $${percentage}% traffic"
+              exit 1
+            fi
+            
+            sleep 15
+          done
+          
+          sleep 30
         done
 
-        if [ "$${healthy_count}" -lt "$${SIZE}" ]; then
-          echo "ERROR: New MIG did not reach required healthy instances in time. Aborting traffic switch."
-          exit 1
-        fi
-
-        echo "Switching traffic: scaling new MIG to full traffic..."
-        gcloud compute backend-services update-backend demo-backend \
-          --instance-group=$${GREEN_MIG} \
-          --instance-group-zone=$${ZONE} \
-          --global \
-          --capacity-scaler=1.0
-
-        sleep 30
-
+        # If old MIG exists, drain and remove it
         if [[ -n "$${BLUE_MIG}" ]]; then
-          echo "Draining old MIG ($${BLUE_MIG}) and removing from backend..."
-          gcloud compute backend-services update-backend demo-backend \
+          echo "Draining old MIG..."
+          gcloud compute backend-services update-backend $${BACKEND_SERVICE} \
             --instance-group=$${BLUE_MIG} \
             --instance-group-zone=$${ZONE} \
             --global \
             --capacity-scaler=0.0
 
-          sleep 30
+          sleep 180  # Allow connections to drain
 
-          gcloud compute backend-services remove-backend demo-backend \
+          echo "Removing old MIG from backend..."
+          gcloud compute backend-services remove-backend $${BACKEND_SERVICE} \
             --instance-group=$${BLUE_MIG} \
             --instance-group-zone=$${ZONE} \
-            --global --quiet
+            --global
 
           echo "Deleting old MIG..."
           gcloud compute instance-groups managed delete $${BLUE_MIG} \
