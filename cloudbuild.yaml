@@ -1,5 +1,4 @@
 options:
-  # This is configured at the trigger level, not here, to avoid errors.
   logging: CLOUD_LOGGING_ONLY
 
 steps:
@@ -79,8 +78,12 @@ steps:
           --base-instance-name=web-green \
           --template=$${TEMPLATE} \
           --size=2 \
+          --zone=$${ZONE}
+
+        # Add the 'green' label after creation.
+        gcloud compute instance-groups managed update $${GREEN_MIG} \
           --zone=$${ZONE} \
-          --labels=status=green
+          --update-labels=status=green
 
         echo "Configuring named ports..."
         gcloud compute instance-groups set-named-ports $${GREEN_MIG} \
