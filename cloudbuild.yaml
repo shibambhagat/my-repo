@@ -29,22 +29,24 @@ steps:
         echo "Creating startup script..."
         cat > startup.sh << 'EOL'
         #!/bin/bash
-        set -euo pipefail
         apt-get update -y && apt-get install -y docker.io > /dev/null 2>&1
         systemctl enable docker
         systemctl start docker
         sleep 10
         gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
-        docker pull asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}
+        
+        # Get the image tag from metadata
+        IMAGE_TAG=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/IMAGE_TAG" -H "Metadata-Flavor: Google")
+        
+        docker pull asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${IMAGE_TAG}
         docker stop simple-web-app || true
         docker rm simple-web-app || true
-        docker run -d --restart=always -p 8080:8080 --name simple-web-app \
-          asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}
-        echo "Container deployment completed at $(date)" >> /var/log/startup-script.log
+        docker run -d --restart=always -p 8080:8080 --name simple-web-app asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${IMAGE_TAG}
+        echo "Container deployment completed: $(date)" >> /var/log/startup-script.log
         EOL
         chmod +x startup.sh
 
-  # Step 4: Blue-Green Deployment with no downtime
+  # Step 4: Blue-Green Deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-bluegreen'
     entrypoint: 'bash'
@@ -52,97 +54,137 @@ steps:
       - '-c'
       - |
         set -euo pipefail
-        SHORT_SHA="${SHORT_SHA}"
-        ZONE="asia-south1-a"
-        TEMPLATE="it-${SHORT_SHA}"
-        GREEN_MIG="green-mig-${SHORT_SHA}"
+        echo "Starting blue-green deploy for ${SHORT_SHA}"
+        TEMPLATE=it-${SHORT_SHA}
+        GREEN_MIG=green-mig-${SHORT_SHA}
+        ZONE=asia-south1-a
 
-        echo "🔵 Starting blue-green deploy for commit $SHORT_SHA..."
+        # Get current active MIG
+        BLUE_MIG=$(gcloud compute instance-groups managed list \
+          --zones=$${ZONE} \
+          --format="get(name)" \
+          --filter="name:green-mig-*" | head -n 1) || true
+        echo "Current active MIG: $${BLUE_MIG}"
 
-        # Detect current active MIG from backend service
-        BLUE_MIG=$(gcloud compute backend-services describe demo-backend --global \
-          --format="value(backends.instanceGroup)" \
-          | grep "green-mig-" | sed 's#.*/##' | head -n 1 || true)
-
-        echo "Current active MIG: ${BLUE_MIG:-none}"
-
-        echo "📦 Creating instance template..."
-        gcloud compute instance-templates create $TEMPLATE \
+        echo "Creating new instance template..."
+        gcloud compute instance-templates create $${TEMPLATE} \
           --metadata-from-file=startup-script=startup.sh \
-          --metadata=IMAGE="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app",IMAGE_TAG="$SHORT_SHA" \
-          --service-account="469028311605-compute@developer.gserviceaccount.com" \
+          --metadata=IMAGE_TAG='${SHORT_SHA}' \
+          --service-account='469028311605-compute@developer.gserviceaccount.com' \
           --scopes=https://www.googleapis.com/auth/cloud-platform \
-          --machine-type=e2-micro
+          --machine-type=e2-micro \
+          --tags=http-server
 
-        echo "🟢 Creating new MIG..."
-        gcloud compute instance-groups managed create $GREEN_MIG \
-          --base-instance-name="web-green" \
-          --template=$TEMPLATE \
+        echo "Creating new MIG..."
+        gcloud compute instance-groups managed create $${GREEN_MIG} \
+          --base-instance-name=web-green \
+          --template=$${TEMPLATE} \
           --size=2 \
-          --zone=$ZONE
+          --zone=$${ZONE}
 
         echo "Configuring named ports..."
-        gcloud compute instance-groups set-named-ports $GREEN_MIG \
+        gcloud compute instance-groups set-named-ports $${GREEN_MIG} \
           --named-ports=http:8080 \
-          --zone=$ZONE
+          --zone=$${ZONE}
 
-        echo "➕ Adding new MIG to backend (0% traffic)..."
+        # Wait for instances to be running
+        echo "Waiting for instances to be running..."
+        gcloud compute instance-groups managed wait-until $${GREEN_MIG} \
+          --stable \
+          --zone=$${ZONE} \
+          --timeout=300
+
+        echo "Adding new MIG to backend service with initial 0% traffic..."
         gcloud compute backend-services add-backend demo-backend \
-          --instance-group=$GREEN_MIG \
-          --instance-group-zone=$ZONE \
+          --instance-group=$${GREEN_MIG} \
+          --instance-group-zone=$${ZONE} \
           --global \
           --balancing-mode=UTILIZATION \
           --max-utilization=0.8 \
-          --capacity-scaler=0.0
+          --capacity-scaler=0.0 || true
 
-        echo "⏳ Waiting for new MIG instances to initialize..."
-        sleep 60
+        echo "Waiting for new instances to initialize..."
+        sleep 90  # Allow instances to fully start and pass health checks
 
-        echo "➡️ Shifting 50% traffic..."
+        echo "Gradually increasing traffic to new instances..."
         gcloud compute backend-services update-backend demo-backend \
-          --instance-group=$GREEN_MIG \
-          --instance-group-zone=$ZONE \
+          --instance-group=$${GREEN_MIG} \
+          --instance-group-zone=$${ZONE} \
           --global \
           --capacity-scaler=0.5
 
-        echo "Checking health status..."
-        for i in {1..12}; do
-          STATUS=$(gcloud compute backend-services get-health demo-backend --global \
-            --format='get(status.healthStatus[].healthState)' || true)
-          echo "Health check $i: $STATUS"
-          if [[ "$STATUS" == *"HEALTHY"* ]]; then
-            echo "✅ New MIG healthy!"
-            sleep 20
-            echo "➡️ Moving to 100% traffic..."
-            gcloud compute backend-services update-backend demo-backend \
-              --instance-group=$GREEN_MIG \
-              --instance-group-zone=$ZONE \
-              --global \
-              --capacity-scaler=1.0
-
-            if [[ -n "$BLUE_MIG" ]]; then
-              echo "♻️ Draining old MIG: $BLUE_MIG..."
-              gcloud compute backend-services update-backend demo-backend \
-                --instance-group=$BLUE_MIG \
-                --instance-group-zone=$ZONE \
-                --global \
-                --capacity-scaler=0.0 || true
-              sleep 20
-              echo "🗑 Removing old MIG $BLUE_MIG..."
-              gcloud compute backend-services remove-backend demo-backend \
-                --instance-group=$BLUE_MIG \
-                --instance-group-zone=$ZONE \
-                --global --quiet || true
-              gcloud compute instance-groups managed delete $BLUE_MIG \
-                --zone=$ZONE --quiet || true
-              OLD_TEMPLATE="it-${BLUE_MIG#green-mig-}"
-              gcloud compute instance-templates delete $OLD_TEMPLATE --quiet || true
-            fi
-            echo "🎉 Deployment complete without downtime!"
+        echo "Waiting for health checks..."
+        HEALTHY=false
+        for i in {1..20}; do  # 3+ minute wait
+          echo "Health check attempt $i..."
+          
+          # Check if backend has healthy instances
+          HEALTH_COUNT=$(gcloud compute backend-services get-health demo-backend --global \
+            --format='value(status.healthStatus[].healthState)' | grep -c "HEALTHY" || echo "0")
+          
+          if [[ $${HEALTH_COUNT} -gt 0 ]]; then
+            echo "✓ New instances are healthy"
+            HEALTHY=true
             break
           fi
           sleep 10
         done
 
+        if [[ "$${HEALTHY}" == "true" ]]; then
+          # Increase to full traffic
+          echo "Shifting 100% traffic to new instances..."
+          gcloud compute backend-services update-backend demo-backend \
+            --instance-group=$${GREEN_MIG} \
+            --instance-group-zone=$${ZONE} \
+            --global \
+            --capacity-scaler=1.0
+
+          sleep 30  # Allow traffic to stabilize
+          
+          if [[ -n "$${BLUE_MIG}" ]]; then
+            echo "Draining connections from old MIG..."
+            gcloud compute backend-services update-backend demo-backend \
+              --instance-group=$${BLUE_MIG} \
+              --instance-group-zone=$${ZONE} \
+              --global \
+              --capacity-scaler=0.0 || true
+
+            sleep 60  # Allow connections to drain properly
+
+            echo "Removing old MIG from backend..."
+            gcloud compute backend-services remove-backend demo-backend \
+              --instance-group=$${BLUE_MIG} \
+              --instance-group-zone=$${ZONE} \
+              --global --quiet || true
+
+            echo "Deleting old MIG..."
+            gcloud compute instance-groups managed delete $${BLUE_MIG} \
+              --zone=$${ZONE} --quiet || true
+
+            echo "Cleaning up old template..."
+            OLD_TEMPLATE=$(gcloud compute instance-templates list \
+              --filter="name:it-*" \
+              --format="get(name)" | grep -v $${TEMPLATE} | head -n 1) || true
+            if [[ -n "$${OLD_TEMPLATE}" ]]; then
+              gcloud compute instance-templates delete $${OLD_TEMPLATE} --quiet || true
+            fi
+          fi
+          
+          echo "✓ Deployment completed successfully"
+        else
+          echo "ERROR: New instances not healthy, keeping old deployment"
+          # Clean up failed deployment
+          gcloud compute backend-services remove-backend demo-backend \
+            --instance-group=$${GREEN_MIG} \
+            --instance-group-zone=$${ZONE} \
+            --global --quiet || true
+          gcloud compute instance-groups managed delete $${GREEN_MIG} \
+            --zone=$${ZONE} --quiet || true
+          gcloud compute instance-templates delete $${TEMPLATE} --quiet || true
+          exit 1
+        fi
+
 images:
   - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
+
+timeout: '1200s'  # 20 minute timeout
