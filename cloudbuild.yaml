@@ -1,6 +1,6 @@
+timeout: "2400s"  # 40 minutes total timeout
 options:
   logging: CLOUD_LOGGING_ONLY
-  timeout: "2400s"  # 40 minutes total timeout
 
 steps:
   # Step 1: Build Docker image
