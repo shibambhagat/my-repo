@@ -1,5 +1,4 @@
 options:
-  logsBucket: 'gs://third-octagon-465311-r5-cloudbuild-logs'
   logging: CLOUD_LOGGING_ONLY
 
 steps:
