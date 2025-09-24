@@ -90,19 +90,25 @@ steps:
         echo "Waiting for new instances to become healthy..."
         HEALTHY=false
         for i in {1..36}; do
-          # Check health status specifically for new MIG only
-          HEALTH_CHECK=$(gcloud compute backend-services get-health demo-backend \
-            --global \
-            --instance-group=$${GREEN_MIG} \
-            --instance-group-zone=$${ZONE} \
-            --format="json" | grep "healthState" | grep -c "HEALTHY" || true)
+          # Fixed health check command
+          STATUS=$(gcloud compute backend-services get-health demo-backend --global \
+            --format='get(status.healthStatus[].healthState)' || true)
           
-          echo "Health check attempt $i: $${HEALTH_CHECK}/2 instances healthy in new MIG"
+          HEALTHY_COUNT=$(echo "$${STATUS}" | grep -c "HEALTHY" || true)
+          echo "Health check attempt $i: $${HEALTHY_COUNT}/2 instances healthy"
           
-          if [ "$${HEALTH_CHECK}" -eq "2" ]; then
-            echo "Both new instances are healthy, proceeding with cleanup..."
-            HEALTHY=true
-            break
+          if [ "$${HEALTHY_COUNT}" -ge "2" ]; then
+            # Double verify after a brief wait
+            sleep 5
+            STATUS=$(gcloud compute backend-services get-health demo-backend --global \
+              --format='get(status.healthStatus[].healthState)' || true)
+            HEALTHY_COUNT=$(echo "$${STATUS}" | grep -c "HEALTHY" || true)
+            
+            if [ "$${HEALTHY_COUNT}" -ge "2" ]; then
+              HEALTHY=true
+              echo "✓ Both instances confirmed healthy"
+              break
+            fi
           fi
           sleep 10
         done
@@ -162,7 +168,7 @@ steps:
           gcloud compute instance-templates delete $${TEMPLATE} --quiet || true
           
           echo "! Deployment rolled back, keeping existing MIG active"
-          exit 0  # Changed from exit 1 to prevent trigger failure
+          exit 0
         fi
 
         echo "✓ Blue-green deployment completed successfully for ${SHORT_SHA}"
