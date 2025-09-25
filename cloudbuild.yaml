@@ -31,12 +31,14 @@ steps:
         
         # -------------------------
         # Dynamic Variables
+        # All user-defined variables now start with an underscore
+        # to prevent Cloud Build from misinterpreting them.
         # -------------------------
-        COMMIT_SHA="${SHORT_SHA}"
-        _TEMPLATE="it-${COMMIT_SHA}"
-        _MIG="green-mig-${COMMIT_SHA}" # Use a standard name format to find old MIGs
-        ZONE="asia-south1-a"
-        BACKEND_SERVICE="demo-backend"
+        _COMMIT_SHA="${SHORT_SHA}"
+        _TEMPLATE="it-${_COMMIT_SHA}"
+        _MIG="green-mig-${_COMMIT_SHA}"
+        _ZONE="asia-south1-a"
+        _BACKEND_SERVICE="demo-backend"
         
         echo "✅ Creating new instance template: ${_TEMPLATE}"
         
@@ -59,7 +61,7 @@ steps:
         
         gcloud compute instance-templates create "${_TEMPLATE}" \
           --metadata-from-file=startup-script=startup.sh \
-          --metadata=IMAGE='asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app',IMAGE_TAG='${COMMIT_SHA}' \
+          --metadata=IMAGE='asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app',IMAGE_TAG='${_COMMIT_SHA}' \
           --service-account='469028311605-compute@developer.gserviceaccount.com' \
           --scopes=https://www.googleapis.com/auth/cloud-platform \
           --machine-type=e2-micro \
@@ -76,7 +78,7 @@ steps:
           --base-instance-name="${_MIG}" \
           --size=2 \
           --template="${_TEMPLATE}" \
-          --zone="${ZONE}" \
+          --zone="${_ZONE}" \
           --quiet
         
         # -------------------------
@@ -85,12 +87,12 @@ steps:
         echo "🔧 Setting named port 'http:8080' for MIG ${_MIG}"
         gcloud compute instance-groups set-named-ports "${_MIG}" \
           --named-ports=http:8080 \
-          --zone="${ZONE}" \
+          --zone="${_ZONE}" \
           --quiet
         
         echo "⏳ Waiting for new MIG to become healthy (max 300s)..."
         # -------------------------
-        # Wait for MIG health (based on your friend's logic)
+        # Wait for MIG health
         # -------------------------
         timeout=300
         interval=15
@@ -99,7 +101,7 @@ steps:
 
         while [[ $elapsed -lt $timeout ]]; do
           status=$(gcloud compute instance-groups managed list-instances "${_MIG}" \
-            --zone="${ZONE}" \
+            --zone="${_ZONE}" \
             --format="value(instanceStatus)" || true)
         
           if [[ -n "$status" ]] && ! echo "$status" | grep -qv "RUNNING"; then
@@ -115,7 +117,7 @@ steps:
 
         if [[ "$healthy" != "true" ]]; then
           echo "❌ ERROR: MIG ${_MIG} failed to become healthy within $timeout seconds. Rolling back."
-          gcloud compute instance-groups managed delete "${_MIG}" --zone="${ZONE}" --quiet || true
+          gcloud compute instance-groups managed delete "${_MIG}" --zone="${_ZONE}" --quiet || true
           gcloud compute instance-templates delete "${_TEMPLATE}" --quiet || true
           exit 1
         fi
@@ -123,10 +125,10 @@ steps:
         # -------------------------
         # Attach new MIG to Load Balancer backend
         # -------------------------
-        echo "🔀 Attaching new MIG ${_MIG} to backend service ${BACKEND_SERVICE}"
-        gcloud compute backend-services add-backend "${BACKEND_SERVICE}" \
+        echo "🔀 Attaching new MIG ${_MIG} to backend service ${_BACKEND_SERVICE}"
+        gcloud compute backend-services add-backend "${_BACKEND_SERVICE}" \
           --instance-group="${_MIG}" \
-          --instance-group-zone="${ZONE}" \
+          --instance-group-zone="${_ZONE}" \
           --global \
           --quiet
         
@@ -137,7 +139,7 @@ steps:
         # Detach and delete all old MIGs
         # -------------------------
         echo "🗑 Detaching and deleting old MIGs from LB backend..."
-        attached_migs=$(gcloud compute backend-services describe "${BACKEND_SERVICE}" --global --format="value(backends.group)" || true)
+        attached_migs=$(gcloud compute backend-services describe "${_BACKEND_SERVICE}" --global --format="value(backends.group)" || true)
         
         if [[ -n "$attached_migs" ]]; then
           IFS=";" read -ra MIG_ARRAY <<< "$attached_migs"
@@ -149,11 +151,11 @@ steps:
               continue
             fi
         
-            echo "🛑 Detaching old MIG: ${MIG_NAME} from backend ${BACKEND_SERVICE}"
+            echo "🛑 Detaching old MIG: ${MIG_NAME} from backend ${_BACKEND_SERVICE}"
             set +e
-            gcloud compute backend-services remove-backend "${BACKEND_SERVICE}" \
+            gcloud compute backend-services remove-backend "${_BACKEND_SERVICE}" \
               --instance-group="${MIG_NAME}" \
-              --instance-group-zone="${ZONE}" \
+              --instance-group-zone="${_ZONE}" \
               --global \
               --quiet || true
             set -e
@@ -166,7 +168,7 @@ steps:
         echo "🗑 Deleting old resources..."
         old_migs=$(gcloud compute instance-groups managed list --format="value(name)" --filter="name ~ ^green-mig-" | grep -v "${_MIG}" || true)
         if [[ -n "$old_migs" ]]; then
-          gcloud compute instance-groups managed delete $old_migs --zone="${ZONE}" --quiet || true
+          gcloud compute instance-groups managed delete $old_migs --zone="${_ZONE}" --quiet || true
         fi
         
         old_templates=$(gcloud compute instance-templates list --format="value(name)" --filter="name ~ ^it-" | grep -v "${_TEMPLATE}" || true)
