@@ -40,11 +40,10 @@ steps:
         _ZONE="asia-south1-a"
         _BACKEND_SERVICE="demo-backend"
         
-        echo "✅ Creating new instance template: ${_TEMPLATE}"
-        
         # -------------------------
-        # Create new instance template with startup script
+        # Create startup script file
         # -------------------------
+        echo "Creating startup script..."
         cat > startup.sh << 'EOL'
         #!/bin/bash
         apt-get update -y && apt-get install -y docker.io > /dev/null 2>&1
@@ -59,6 +58,13 @@ steps:
         echo "Container deployment completed: $(date)" >> /var/log/startup-script.log
         EOL
         
+        chmod +x startup.sh
+        
+        echo "✅ Creating new instance template: ${_TEMPLATE}"
+        
+        # -------------------------
+        # Create new instance template
+        # -------------------------
         gcloud compute instance-templates create "${_TEMPLATE}" \
           --metadata-from-file=startup-script=startup.sh \
           --metadata=IMAGE='asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app',IMAGE_TAG='${_COMMIT_SHA}' \
