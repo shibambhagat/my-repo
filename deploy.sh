@@ -23,11 +23,16 @@ _IMAGE_REGISTRY="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-rep
 echo "Creating startup script..."
 cat > startup.sh << EOL
 #!/bin/bash
-apt-get update -y && apt-get install -y docker.io > /dev/null 2>&1
+apt-get update -y
+apt-get install -y docker.io > /dev/null 2>&1
 systemctl enable docker
 systemctl start docker
+
+# NEW: Use gcloud to get a short-lived access token and pipe it to docker login
+ACCESS_TOKEN=\$(gcloud auth print-access-token --quiet)
+echo "\$ACCESS_TOKEN" | docker login -u oauth2accesstoken --password-stdin https://asia-south1-docker.pkg.dev
+
 sleep 10
-gcloud auth configure-docker ${_IMAGE_REGISTRY%%/*} --quiet
 docker pull ${_IMAGE_REGISTRY}:${_COMMIT_SHA}
 docker stop simple-web-app || true
 docker rm simple-web-app || true
