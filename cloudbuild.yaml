@@ -142,19 +142,18 @@ steps:
         attached_migs=$(gcloud compute backend-services describe "${_BACKEND_SERVICE}" --global --format="value(backends.group)" || true)
         
         if [[ -n "$attached_migs" ]]; then
-          IFS=";" read -ra MIG_ARRAY <<< "$attached_migs"
-          for m in "${MIG_ARRAY[@]}"; do
-            MIG_NAME=$(basename "$m")
-        
+          echo "$attached_migs" | tr ';' '\n' | while read -r mig_url; do
+            _MIG_NAME=$(basename "$mig_url")
+            
             # Skip the new MIG
-            if [[ "$MIG_NAME" == "${_MIG}" ]]; then
+            if [[ "$_MIG_NAME" == "${_MIG}" ]]; then
               continue
             fi
-        
-            echo "🛑 Detaching old MIG: ${MIG_NAME} from backend ${_BACKEND_SERVICE}"
+            
+            echo "🛑 Detaching old MIG: ${_MIG_NAME} from backend ${_BACKEND_SERVICE}"
             set +e
             gcloud compute backend-services remove-backend "${_BACKEND_SERVICE}" \
-              --instance-group="${MIG_NAME}" \
+              --instance-group="${_MIG_NAME}" \
               --instance-group-zone="${_ZONE}" \
               --global \
               --quiet || true
