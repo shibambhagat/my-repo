@@ -20,11 +20,11 @@ steps:
         'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
       ]
 
-  # Step 3: Run the deployment script
+  # Step 3: Run the deployment script and pass SHORT_SHA as an argument
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-and-cleanup'
     entrypoint: 'bash'
-    args: ['deploy.sh']
+    args: ['deploy.sh', '${SHORT_SHA}']  # Pass SHORT_SHA as an argument
 
 images:
   - 'asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${SHORT_SHA}'
