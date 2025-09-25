@@ -21,23 +21,24 @@ _IMAGE_REGISTRY="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-rep
 # Create startup script file
 # -------------------------
 echo "Creating startup script..."
-cat > startup.sh << EOL
+# Corrected: Using the single quotes on 'EOL' tells the shell to NOT interpret variables.
+cat > startup.sh << 'EOL'
 #!/bin/bash
 apt-get update -y
 apt-get install -y docker.io > /dev/null 2>&1
 systemctl enable docker
 systemctl start docker
 
-# NEW: Use gcloud to get a short-lived access token and pipe it to docker login
-ACCESS_TOKEN=\$(gcloud auth print-access-token --quiet)
-echo "\$ACCESS_TOKEN" | docker login -u oauth2accesstoken --password-stdin https://asia-south1-docker.pkg.dev
+# Generate and use a new access token on the VM itself
+gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+echo "Docker authenticated successfully."
 
 sleep 10
-docker pull ${_IMAGE_REGISTRY}:${_COMMIT_SHA}
+docker pull asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${_COMMIT_SHA}
 docker stop simple-web-app || true
 docker rm simple-web-app || true
-docker run -d --restart=always -p 8080:8080 --name simple-web-app ${_IMAGE_REGISTRY}:${_COMMIT_SHA}
-echo "Container deployment completed: \$(date)" >> /var/log/startup-script.log
+docker run -d --restart=always -p 8080:8080 --name simple-web-app asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app:${_COMMIT_SHA}
+echo "Container deployment completed: $(date)" >> /var/log/startup-script.log
 EOL
 
 chmod +x startup.sh
