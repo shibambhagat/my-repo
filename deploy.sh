@@ -1,12 +1,14 @@
 #!/bin/bash
 set -e
 
+# This script is a direct adaptation of your friend's working solution.
+# All variables have been updated to match your project details.
+
 # -------------------------
 # Dynamic Variables
 # -------------------------
-# The SHORT_SHA is passed by Cloud Build automatically.
-# TEMPLATE is now unique to prevent conflicts.
-_COMMIT_SHA="${SHORT_SHA}"
+# The SHORT_SHA is passed from Cloud Build as the first argument.
+_COMMIT_SHA="$1"
 _TEMPLATE="it-${_COMMIT_SHA}"
 _MIG="green-mig-${_COMMIT_SHA}"
 _ZONE="asia-south1-a"
