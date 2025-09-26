@@ -178,12 +178,11 @@ attached_migs=$(gcloud compute backend-services describe "${_BACKEND_SERVICE}" -
 if [[ -n "$attached_migs" ]]; then
 echo "$attached_migs" | tr ';' '\n' | while read -r mig_url; do
 _MIG_NAME=$(basename "$mig_url")
-    
+
 # Skip the new MIG
 if [[ "$_MIG_NAME" == "${_MIG}" ]]; then
 continue
 fi
-    
 echo "🛑 Detaching old MIG: ${_MIG_NAME} from backend ${_BACKEND_SERVICE}"
 set +e
 gcloud compute backend-services remove-backend "${_BACKEND_SERVICE}" \
