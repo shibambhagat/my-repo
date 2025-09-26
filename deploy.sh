@@ -18,7 +18,6 @@ FULL_IMAGE_URL="${_IMAGE_REGISTRY}:${_COMMIT_SHA}"
 # Create startup script file
 # -------------------------
 echo "Creating startup script..."
-# Correctly injecting variables
 cat > startup.sh << EOL
 #!/bin/bash
 apt-get update -y
@@ -42,7 +41,7 @@ chmod +x startup.sh
 echo "✅ Creating new instance template: ${_TEMPLATE}"
 
 # -------------------------
-# Create new instance template (Cleaned for spacing)
+# Create new instance template
 # -------------------------
 gcloud compute instance-templates create "${_TEMPLATE}" \
 --metadata-from-file=startup-script=startup.sh \
@@ -77,7 +76,7 @@ gcloud compute instance-groups set-named-ports "${_MIG}" \
 
 echo "⏳ Waiting for new MIG to become healthy (max 300s)..."
 # -------------------------
-# Wait for MIG health (Cleaned for NBSP characters)
+# Wait for MIG health
 # -------------------------
 timeout=300
 interval=15
@@ -89,7 +88,6 @@ status=$(gcloud compute instance-groups managed list-instances "${_MIG}" \
 --zone="${_ZONE}" \
 --format="value(instanceStatus)" || true)
 
-# The most sensitive lines are now flush left to avoid invisible character errors
 if [[ -n "$status" ]] && ! echo "$status" | grep -qv "RUNNING"
 then
 echo "✅ MIG ${_MIG} instances are RUNNING."
@@ -123,7 +121,7 @@ echo "⏳ Waiting 30s for new MIG to warm up and serve traffic..."
 sleep 30
 
 # -------------------------
-# Detach and delete all old MIGs
+# Detach and delete all old MIGs (FLUSH LEFT)
 # -------------------------
 echo "🗑 Detaching and deleting old MIGs from LB backend..."
 attached_migs=$(gcloud compute backend-services describe "${_BACKEND_SERVICE}" --global --format="value(backends.group)" || true)
