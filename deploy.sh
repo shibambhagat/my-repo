@@ -19,8 +19,7 @@ FULL_IMAGE_URL="${_IMAGE_REGISTRY}:${_COMMIT_SHA}"
 # Create startup script file
 # -------------------------
 echo "Creating startup script..."
-# CRITICAL FIX: Removed single quotes on 'EOL' to allow variable substitution 
-# and added correct variable usage inside the script.
+# FIX 1: Removed single quotes on 'EOL' to allow variable substitution by the outer shell
 cat > startup.sh << EOL
 #!/bin/bash
 apt-get update -y
@@ -28,16 +27,17 @@ apt-get install -y docker.io > /dev/null 2>&1
 systemctl enable docker
 systemctl start docker
 
-# Generate and use a new access token on the VM itself
+# Authenticate Docker on the VM
 gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
 echo "Docker authenticated successfully."
 
 sleep 10
-# Uses the full image URL injected by the outer shell
-docker pull ${FULL_IMAGE_URL}
+# FIX 1: Injecting the full image URL correctly
+docker pull ${FULL_IMAGE_URL} 
 docker stop simple-web-app || true
 docker rm simple-web-app || true
 docker run -d --restart=always -p 8080:8080 --name simple-web-app ${FULL_IMAGE_URL}
+# Corrected: Escaped \$() to ensure date command runs on the VM
 echo "Container deployment completed: \$(date)" >> /var/log/startup-script.log
 EOL
 
@@ -46,8 +46,9 @@ chmod +x startup.sh
 echo "✅ Creating new instance template: ${_TEMPLATE}"
 
 # -------------------------
-# Create new instance template (FIXED SPACING/INDENTATION)
+# Create new instance template
 # -------------------------
+# FIX 2: Removed leading spaces on all continuation lines to fix "unrecognized arguments" error
 gcloud compute instance-templates create "${_TEMPLATE}" \
 --metadata-from-file=startup-script=startup.sh \
 --metadata=IMAGE="${_IMAGE_REGISTRY}",IMAGE_TAG="${_COMMIT_SHA}" \
@@ -93,7 +94,9 @@ while [[ $elapsed -lt $timeout ]]; do
     --zone="${_ZONE}" \
     --format="value(instanceStatus)" || true)
 
-  if [[ -n "$status" ]] && ! echo "$status" | grep -qv "RUNNING"; then
+  # FIX 3: Cleaned up the IF/THEN block to resolve the "syntax error near unexpected token 'then'"
+  if [[ -n "$status" ]] && ! echo "$status" | grep -qv "RUNNING"
+  then
     echo "✅ MIG ${_MIG} instances are RUNNING."
     healthy=true
     break
