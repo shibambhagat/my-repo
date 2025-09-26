@@ -28,11 +28,26 @@ systemctl start docker
 gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
 echo "Docker authenticated successfully."
 
-sleep 10
+sleep 15  # Increased initial sleep
+
 docker pull ${FULL_IMAGE_URL} 
 docker stop simple-web-app || true
 docker rm simple-web-app || true
 docker run -d --restart=always -p 8080:8080 --name simple-web-app ${FULL_IMAGE_URL}
+
+# NEW: Wait for container to be fully running before script exits
+MAX_TRIES=10
+TRIES=0
+while [ \$(docker inspect -f '{{.State.Running}}' simple-web-app 2>/dev/null) != 'true' ] && [ \$TRIES -lt \$MAX_TRIES ]; do
+  sleep 5
+  TRIES=\$((TRIES+1))
+done
+
+if [ \$TRIES -eq \$MAX_TRIES ]; then
+  echo "Container failed to start after multiple attempts." >> /var/log/startup-script.log
+  exit 1
+fi
+
 echo "Container deployment completed: \$(date)" >> /var/log/startup-script.log
 EOL
 
