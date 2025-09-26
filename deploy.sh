@@ -9,46 +9,37 @@ _TEMPLATE="it-${_COMMIT_SHA}"
 _MIG="green-mig-${_COMMIT_SHA}"
 _ZONE="asia-south1-a"
 _BACKEND_SERVICE="demo-backend"
+_HEALTH_CHECK="demo-hc" # Your existing health check name
 _PROJECT_ID="third-octagon-465311-r5"
 _SERVICE_ACCOUNT="469028311605-compute@developer.gserviceaccount.com"
 _IMAGE_REGISTRY="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app"
 FULL_IMAGE_URL="${_IMAGE_REGISTRY}:${_COMMIT_SHA}"
 
 # -------------------------
-# Create startup script file
+# Create startup script file (MAXIMUM ROBUSTNESS)
 # -------------------------
 echo "Creating startup script..."
 cat > startup.sh << EOL
 #!/bin/bash
+# Install Docker
 apt-get update -y
 apt-get install -y docker.io > /dev/null 2>&1
 systemctl enable docker
 systemctl start docker
 
+# Authenticate Docker
 gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
-echo "Docker authenticated successfully."
 
-sleep 15  # Increased initial sleep
-
-docker pull ${FULL_IMAGE_URL} 
+# Pull and Run Container
+docker pull ${FULL_IMAGE_URL}
 docker stop simple-web-app || true
 docker rm simple-web-app || true
 docker run -d --restart=always -p 8080:8080 --name simple-web-app ${FULL_IMAGE_URL}
 
-# NEW: Wait for container to be fully running before script exits
-MAX_TRIES=10
-TRIES=0
-while [ \$(docker inspect -f '{{.State.Running}}' simple-web-app 2>/dev/null) != 'true' ] && [ \$TRIES -lt \$MAX_TRIES ]; do
-  sleep 5
-  TRIES=\$((TRIES+1))
-done
+# Wait for Node.js app to start up inside the container
+sleep 45 
 
-if [ \$TRIES -eq \$MAX_TRIES ]; then
-  echo "Container failed to start after multiple attempts." >> /var/log/startup-script.log
-  exit 1
-fi
-
-echo "Container deployment completed: \$(date)" >> /var/log/startup-script.log
+echo "Container deployment completed and running on port 8080: \$(date)" >> /var/log/startup-script.log
 EOL
 
 chmod +x startup.sh
@@ -71,13 +62,15 @@ gcloud compute instance-templates create "${_TEMPLATE}" \
 echo "✅ Creating new Managed Instance Group: ${_MIG}"
 
 # -------------------------
-# Create new MIG
+# Create new MIG (Incorporating explicit Health Check and Initial Delay)
 # -------------------------
 gcloud compute instance-groups managed create "${_MIG}" \
 --base-instance-name="${_MIG}" \
 --size=2 \
 --template="${_TEMPLATE}" \
 --zone="${_ZONE}" \
+--health-check="${_HEALTH_CHECK}" \
+--initial-delay=60 \
 --quiet
 
 # -------------------------
@@ -89,10 +82,10 @@ gcloud compute instance-groups set-named-ports "${_MIG}" \
 --zone="${_ZONE}" \
 --quiet
 
-echo "⏳ Waiting for new MIG to become healthy (max 300s)..."
 # -------------------------
 # Wait for MIG health
 # -------------------------
+echo "⏳ Waiting for new MIG to become healthy (max 300s)..."
 timeout=300
 interval=15
 elapsed=0
@@ -136,7 +129,7 @@ echo "⏳ Waiting 30s for new MIG to warm up and serve traffic..."
 sleep 30
 
 # -------------------------
-# Detach and delete all old MIGs (FLUSH LEFT)
+# Detach and delete all old MIGs
 # -------------------------
 echo "🗑 Detaching and deleting old MIGs from LB backend..."
 attached_migs=$(gcloud compute backend-services describe "${_BACKEND_SERVICE}" --global --format="value(backends.group)" || true)
@@ -144,12 +137,12 @@ attached_migs=$(gcloud compute backend-services describe "${_BACKEND_SERVICE}" -
 if [[ -n "$attached_migs" ]]; then
 echo "$attached_migs" | tr ';' '\n' | while read -r mig_url; do
 _MIG_NAME=$(basename "$mig_url")
-    
+
 # Skip the new MIG
 if [[ "$_MIG_NAME" == "${_MIG}" ]]; then
 continue
 fi
-    
+
 echo "🛑 Detaching old MIG: ${_MIG_NAME} from backend ${_BACKEND_SERVICE}"
 set +e
 gcloud compute backend-services remove-backend "${_BACKEND_SERVICE}" \
@@ -158,6 +151,14 @@ gcloud compute backend-services remove-backend "${_BACKEND_SERVICE}" \
 --global \
 --quiet || true
 set -e
+
+# Wait until MIG is fully detached (Added from friend's script for robustness)
+echo "⏳ Waiting for ${_MIG_NAME} to be detached..."
+while gcloud compute backend-services describe "${_BACKEND_SERVICE}" --global --format="value(backends.group)" | grep -q "${_MIG_NAME}"; do
+sleep 5
+done
+echo "✅ MIG ${_MIG_NAME} detached successfully."
+
 done
 else
 echo "No old MIGs attached to backend."
