@@ -21,45 +21,70 @@ MAX_UTILIZATION=0.6
 # -------------------------
 # Create startup script file (Friend's logic, but simplified Docker install)
 # -------------------------
+# Create startup script file (HARDENED VERSION)
+# -------------------------
 echo "Creating startup script..."
-cat > startup.sh << EOL
+# Using 'EOF' prevents variable substitution in the shell, allowing the 
+# inner script to access variables defined in the VM's metadata.
+cat > startup.sh << 'EOF'
 #!/bin/bash
-set -e
+# Log file for troubleshooting
+LOG_FILE="/var/log/startup-script.log"
+exec > >(tee -a $LOG_FILE) 2>&1
+echo "--- Starting startup script at $(date) ---"
 
-# --- Install Docker ---
+# --- 1. Install Docker and Tools ---
+echo "Updating packages and installing Docker..."
 apt-get update -y
-apt-get install -y docker.io > /dev/null 2>&1
+apt-get install -y docker.io -y
 systemctl enable docker
 systemctl start docker
-sleep 5 # Give Docker daemon a moment to stabilize
+echo "Docker service started."
 
-# --- Authenticate Docker ---
-gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+# --- 2. Authenticate to Artifact Registry ---
+# These variables are read from the instance metadata
+PROJECT_ID=$(curl -H "Metadata-Flavor:Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/project-id)
+IMAGE_TAG=$(curl -H "Metadata-Flavor:Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/IMAGE_TAG)
 
-# --- Get TAG (already in script for safety) ---
-IMAGE_TAG="${_COMMIT_SHA}"
+# The base image registry URL is hardcoded or should be read from metadata
+IMAGE_REGISTRY="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app"
+FULL_IMAGE_URL="${IMAGE_REGISTRY}:${IMAGE_TAG}"
+CONTAINER_NAME="simple-web-app"
+PORT=8080
 
-# --- Pull and run Docker container (Exposing 8080 inside) ---
+echo "Authenticating to Artifact Registry..."
+/usr/bin/gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+
+# --- 3. Pull and run the container image ---
+echo "Pulling image: ${FULL_IMAGE_URL}"
 docker pull ${FULL_IMAGE_URL}
-docker rm -f simple-web-app || true
-# Map VM's port 8080 to container's port 8080
-docker run -d \\
-  --restart=always \\
-  --name simple-web-app \\
-  -p 8080:8080 \\
+
+echo "Stopping old container if exists..."
+docker rm -f ${CONTAINER_NAME} || true
+
+echo "Running container on port ${PORT}..."
+# CRITICAL: -p 8080:8080 maps VM's external port 8080 to container's internal port 8080
+docker run -d \
+  --restart=always \
+  --name ${CONTAINER_NAME} \
+  -p ${PORT}:${PORT} \
   ${FULL_IMAGE_URL}
 
-# --- Verify container is running inside VM before startup script exits ---
-sleep 30 
-if ! curl -sf http://localhost:8080/ > /dev/null; then
-  echo "ERROR: Container not responding on port 8080!" >> /var/log/startup-script.log
-  docker logs simple-web-app >> /var/log/startup-script.log
+# --- 4. Final Verification and Logging ---
+sleep 15
+if ! curl -sSf http://localhost:${PORT}/health > /dev/null; then
+  echo "❌ ERROR: Container not responding to /health check on port ${PORT}!"
+  docker logs ${CONTAINER_NAME}
   exit 1
 fi
-echo "✅ Docker container running with image tag: \${IMAGE_TAG}" >> /var/log/startup-script.log
-EOL
+echo "✅ Container deployment completed successfully."
+echo "--- Startup script finished ---"
+EOF
 
 chmod +x startup.sh
+
+echo "✅ Creating new instance template: ${_TEMPLATE}"
+# ... rest of the main script logic ...
 
 echo "✅ Creating new instance template: ${_TEMPLATE}"
 
