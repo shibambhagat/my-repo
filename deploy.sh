@@ -9,7 +9,7 @@ _TEMPLATE="it-${_COMMIT_SHA}"
 _MIG="green-mig-${_COMMIT_SHA}"
 _ZONE="asia-south1-a"
 _BACKEND_SERVICE="demo-backend"
-_HEALTH_CHECK="demo-hc" # Make sure this is the correct Health Check Name
+_HEALTH_CHECK="demo-hc" # Confirmed to be correct and using /health path
 _PROJECT_ID="third-octagon-465311-r5"
 _SERVICE_ACCOUNT="469028311605-compute@developer.gserviceaccount.com"
 _IMAGE_REGISTRY="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app"
@@ -19,13 +19,11 @@ MAX_INSTANCES=5
 MAX_UTILIZATION=0.6
 
 # -------------------------
-# Create startup script file (Friend's logic, but simplified Docker install)
-# -------------------------
-# Create startup script file (HARDENED VERSION)
+# Create startup script file (HARDENED & STABILIZED VERSION)
 # -------------------------
 echo "Creating startup script..."
-# Using 'EOF' prevents variable substitution in the shell, allowing the 
-# inner script to access variables defined in the VM's metadata.
+# CRITICAL: Using 'EOF' prevents shell variable substitution, ensuring the script 
+# reads variables (like IMAGE_TAG) from VM metadata at runtime.
 cat > startup.sh << 'EOF'
 #!/bin/bash
 # Log file for troubleshooting
@@ -37,16 +35,21 @@ echo "--- Starting startup script at $(date) ---"
 echo "Updating packages and installing Docker..."
 apt-get update -y
 apt-get install -y docker.io -y
-systemctl enable docker
+
+# CRITICAL FIX: Start Docker and ensure it's enabled
 systemctl start docker
-echo "Docker service started."
+systemctl enable docker
+
+# ADDED STABILITY FIX: Wait 10 seconds for the Docker daemon to fully initialize
+sleep 10
+echo "Docker service started and stabilized."
 
 # --- 2. Authenticate to Artifact Registry ---
 # These variables are read from the instance metadata
-PROJECT_ID=$(curl -H "Metadata-Flavor:Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/project-id)
+# PROJECT_ID=$(curl -H "Metadata-Flavor:Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/project-id)
 IMAGE_TAG=$(curl -H "Metadata-Flavor:Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/IMAGE_TAG)
 
-# The base image registry URL is hardcoded or should be read from metadata
+# The base image registry URL is hardcoded as per your project setup
 IMAGE_REGISTRY="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app"
 FULL_IMAGE_URL="${IMAGE_REGISTRY}:${IMAGE_TAG}"
 CONTAINER_NAME="simple-web-app"
@@ -72,6 +75,7 @@ docker run -d \
 
 # --- 4. Final Verification and Logging ---
 sleep 15
+# Uses /health endpoint, which is correctly implemented in index.js
 if ! curl -sSf http://localhost:${PORT}/health > /dev/null; then
   echo "❌ ERROR: Container not responding to /health check on port ${PORT}!"
   docker logs ${CONTAINER_NAME}
@@ -82,9 +86,6 @@ echo "--- Startup script finished ---"
 EOF
 
 chmod +x startup.sh
-
-echo "✅ Creating new instance template: ${_TEMPLATE}"
-# ... rest of the main script logic ...
 
 echo "✅ Creating new instance template: ${_TEMPLATE}"
 
