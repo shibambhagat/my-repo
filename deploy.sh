@@ -2,28 +2,26 @@
 set -e
 
 # -------------------------
-# Dynamic Variables
+# Dynamic Variables (Unchanged and Correct)
 # -------------------------
 _COMMIT_SHA="$1"
 _TEMPLATE="it-${_COMMIT_SHA}"
 _MIG="green-mig-${_COMMIT_SHA}"
 _ZONE="asia-south1-a"
 _BACKEND_SERVICE="demo-backend"
-_HEALTH_CHECK="demo-hc" # Confirmed to be correct and using /health path
+_HEALTH_CHECK="demo-hc" 
 _PROJECT_ID="third-octagon-465311-r5"
 _SERVICE_ACCOUNT="469028311605-compute@developer.gserviceaccount.com"
 _IMAGE_REGISTRY="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app"
 FULL_IMAGE_URL="${_IMAGE_REGISTRY}:${_COMMIT_SHA}"
-MIN_INSTANCES=2 # Start with 2 instances
+MIN_INSTANCES=2
 MAX_INSTANCES=5
 MAX_UTILIZATION=0.6
 
 # -------------------------
-# Create startup script file (HARDENED & STABILIZED VERSION)
+# Create startup script file (FINAL HARDENED VERSION)
 # -------------------------
 echo "Creating startup script..."
-# CRITICAL: Using 'EOF' prevents shell variable substitution, ensuring the script 
-# reads variables (like IMAGE_TAG) from VM metadata at runtime.
 cat > startup.sh << 'EOF'
 #!/bin/bash
 # Log file for troubleshooting
@@ -36,20 +34,16 @@ echo "Updating packages and installing Docker..."
 apt-get update -y
 apt-get install -y docker.io -y
 
-# CRITICAL FIX: Start Docker and ensure it's enabled
+# CRITICAL FIX 1: Start Docker and ensure it's enabled
 systemctl start docker
 systemctl enable docker
 
-# ADDED STABILITY FIX: Wait 10 seconds for the Docker daemon to fully initialize
+# CRITICAL FIX 2: Wait 10 seconds for the Docker daemon to fully initialize
 sleep 10
 echo "Docker service started and stabilized."
 
 # --- 2. Authenticate to Artifact Registry ---
-# These variables are read from the instance metadata
-# PROJECT_ID=$(curl -H "Metadata-Flavor:Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/project-id)
 IMAGE_TAG=$(curl -H "Metadata-Flavor:Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/IMAGE_TAG)
-
-# The base image registry URL is hardcoded as per your project setup
 IMAGE_REGISTRY="asia-south1-docker.pkg.dev/third-octagon-465311-r5/artifact-repo/simple-web-app"
 FULL_IMAGE_URL="${IMAGE_REGISTRY}:${IMAGE_TAG}"
 CONTAINER_NAME="simple-web-app"
@@ -75,10 +69,14 @@ docker run -d \
 
 # --- 4. Final Verification and Logging ---
 sleep 15
-# Uses /health endpoint, which is correctly implemented in index.js
+# CRITICAL FIX 3: Change internal VM check to use the correct /health path.
+# This ensures we test the same path the LB uses.
 if ! curl -sSf http://localhost:${PORT}/health > /dev/null; then
   echo "❌ ERROR: Container not responding to /health check on port ${PORT}!"
   docker logs ${CONTAINER_NAME}
+  # Log running containers/processes for deep debugging before exit
+  docker ps -a
+  journalctl -u docker.service
   exit 1
 fi
 echo "✅ Container deployment completed successfully."
@@ -135,15 +133,31 @@ elapsed=0
 healthy=false
 
 while [[ $elapsed -lt $timeout ]]; do
+# Check for instances that are NOT RUNNING (i.e., status is NOT RUNNING, or status is null)
 status=$(gcloud compute instance-groups managed list-instances "${_MIG}" \
 --zone="${_ZONE}" \
 --format="value(instanceStatus)" | grep -v "RUNNING" || true)
 
-# If status is empty, all instances are RUNNING and presumably healthy.
+# If status is empty, all instances are RUNNING.
 if [[ -z "$status" ]]; then 
   echo "✅ MIG ${_MIG} instances are RUNNING."
-  healthy=true
-  break
+  # Now wait for the Load Balancer Health Check to confirm health (wait 60 more seconds)
+  echo "⏳ Waiting 60s for health checks to cycle..."
+  sleep 60
+  
+  # Check instance health status in the MIG
+  # The status field here is the *actual* health check status, not instance lifecycle status.
+  health_status=$(gcloud compute instance-groups managed list-instances "${_MIG}" \
+      --zone="${_ZONE}" \
+      --format="value(healthStatus)" | grep -v "HEALTHY" || true)
+      
+  if [[ -z "$health_status" ]]; then
+      echo "✅ MIG ${_MIG} instances are HEALTHY via Load Balancer."
+      healthy=true
+      break
+  else
+      echo "⚠️ Instances are RUNNING but Load Balancer health check status is: $health_status"
+  fi
 fi
 
 echo "⏳ Still waiting... ($elapsed/$timeout seconds)"
